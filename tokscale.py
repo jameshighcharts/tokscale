@@ -306,15 +306,11 @@ def main() -> None:
     commands = parser.add_subparsers(dest="command", required=True)
     models = commands.add_parser("models", help="show usage grouped by model")
     models.add_argument("--breakdown", action="store_true", help="show token categories")
-    models.add_argument(
-        "period",
-        nargs="?",
-        choices=("daily", "weekly", "monthly", "all"),
-        default="all",
-        help="current period to include (default: all)",
-    )
+    periods = models.add_mutually_exclusive_group()
+    for period in ("daily", "weekly", "monthly", "all"):
+        periods.add_argument(f"--{period}", dest="period", action="store_const", const=period)
     args = parser.parse_args()
-    print_models(args.breakdown, args.period)
+    print_models(args.breakdown, args.period or "all")
 
 
 if __name__ == "__main__":

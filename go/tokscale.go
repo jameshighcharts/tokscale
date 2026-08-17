@@ -323,7 +323,7 @@ func report(c *collector, breakdown bool) {
 func arguments() (bool, string) {
 	args := os.Args[1:]
 	if len(args) == 0 || args[0] != "models" {
-		fmt.Fprintln(os.Stderr, "usage: tokscale-go models [--breakdown] [--] [daily|weekly|monthly|all]")
+		fmt.Fprintln(os.Stderr, "usage: tokscale-go models [--breakdown] [--daily|--weekly|--monthly|--all]")
 		os.Exit(2)
 	}
 	breakdown, period := false, "all"
@@ -331,9 +331,8 @@ func arguments() (bool, string) {
 		switch arg {
 		case "--breakdown":
 			breakdown = true
-		case "--":
-		case "daily", "weekly", "monthly", "all":
-			period = arg
+		case "--daily", "--weekly", "--monthly", "--all":
+			period = strings.TrimPrefix(arg, "--")
 		default:
 			fmt.Fprintf(os.Stderr, "unknown argument: %s\n", arg)
 			os.Exit(2)

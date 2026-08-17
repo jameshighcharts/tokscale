@@ -406,7 +406,7 @@ fn report(collector: Collector, breakdown: bool) {
 fn arguments() -> (bool, String) {
     let mut args = env::args().skip(1);
     if args.next().as_deref() != Some("models") {
-        eprintln!("usage: tokscale-rust models [--breakdown] [--] [daily|weekly|monthly|all]");
+        eprintln!("usage: tokscale-rust models [--breakdown] [--daily|--weekly|--monthly|--all]");
         process::exit(2);
     }
     let mut breakdown = false;
@@ -414,8 +414,9 @@ fn arguments() -> (bool, String) {
     for argument in args {
         match argument.as_str() {
             "--breakdown" => breakdown = true,
-            "--" => {}
-            "daily" | "weekly" | "monthly" | "all" => period = argument,
+            "--daily" | "--weekly" | "--monthly" | "--all" => {
+                period = argument.trim_start_matches("--").to_owned()
+            }
             _ => {
                 eprintln!("unknown argument: {argument}");
                 process::exit(2);

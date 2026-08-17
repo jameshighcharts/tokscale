@@ -46,3 +46,27 @@ Reports cover the current operating-system user's `~/.codex` and `~/.claude`
 folders. Other macOS user accounts are not included. If several ChatGPT
 accounts are used from the same macOS user, their retained Codex rollout files
 are combined because historical rollout events do not contain an account ID.
+
+## PostgreSQL history
+
+Postgres.app stores one row per date, provider, and model. Running the snapshot
+again updates existing rows instead of duplicating them and backfills every
+date still present in the local logs. Stored history never decreases if an old
+source log is later truncated or removed:
+
+```bash
+./storage/run_snapshot.sh
+```
+
+Connect with pgAdmin using host `127.0.0.1`, port `55432`, database `tokscale`,
+and your macOS username. Local connections do not require a password. Useful
+queries:
+
+```sql
+SELECT * FROM daily_usage_summary;
+SELECT * FROM daily_model_usage ORDER BY usage_date DESC, total_tokens DESC;
+```
+
+On this Mac, a local Codex automation runs the snapshot every day at 09:00 in
+the local timezone. The usage table is about 48 KB after the initial backfill;
+the PostgreSQL database is about 8 MB before normal PostgreSQL cluster overhead.

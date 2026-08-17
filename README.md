@@ -15,7 +15,7 @@ Open [http://127.0.0.1:8765/index.html](http://127.0.0.1:8765/index.html).
 
 The dashboard has Overview, Usage, Models, Daily, Weekly, Monthly, and Hourly views. `refresh` reads:
 
-- Codex: `~/.codex/state_5.sqlite`
+- Codex: `~/.codex/sessions/**/*.jsonl` (per-turn usage; SQLite is the fallback)
 - Claude Code: `~/.claude/projects/**/*.jsonl`
 - Hook events: `~/.tokscale/events.jsonl`
 
@@ -54,4 +54,4 @@ Accepted cache field names include `cache_read_input_tokens` and `cache_creation
 
 ## Pricing notes
 
-Claude uses Anthropic’s standard global API rates. Cache writes use the 5-minute rate because the local Claude transcript does not include the cache TTL. Codex’s local database exposes a cumulative thread counter, so period views assign each thread total to its last-updated date; this is clearly noted in the generated data.
+Claude uses Anthropic’s standard global API rates. Cache writes use the 5-minute rate because the local Claude transcript does not include the cache TTL. Codex uses per-turn `last_token_usage` records from its rollout JSONL files when available; its cached-input count is included inside input tokens and is shown separately, not added again. SQLite thread totals are the fallback.

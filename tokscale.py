@@ -23,6 +23,8 @@ from zoneinfo import ZoneInfo
 ROOT = Path(__file__).resolve().parent
 HOME = Path.home()
 CODEX_DB = HOME / ".codex" / "state_5.sqlite"
+CODEX_SESSIONS = HOME / ".codex" / "sessions"
+CODEX_ARCHIVED_SESSIONS = HOME / ".codex" / "archived_sessions"
 CLAUDE_PROJECTS = HOME / ".claude" / "projects"
 EVENT_LOG = HOME / ".tokscale" / "events.jsonl"
 DEFAULT_OUTPUT = ROOT / "usage-data.js"
@@ -104,7 +106,51 @@ def make_event(*, provider, model, timestamp, source, input_tokens=0,
     return event
 
 
+def scan_codex_rollouts() -> list[dict]:
+    """Read per-turn Codex usage from local rollout JSONL files.
+
+    Codex's cached input count is a subset of input_tokens, so it is recorded
+    for the breakdown but is not added again to the event total.
+    """
+    events = []
+    bases = [base for base in (CODEX_SESSIONS, CODEX_ARCHIVED_SESSIONS) if base.exists()]
+    for base in bases:
+        for path in base.rglob("*.jsonl"):
+            model = None
+            try:
+                with path.open("r", encoding="utf-8", errors="replace") as stream:
+                    for line in stream:
+                        try:
+                            record = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        payload = record.get("payload") or {}
+                        if record.get("type") == "turn_context" and payload.get("model"):
+                            model = payload["model"]
+                        usage = (payload.get("info") or {}).get("last_token_usage")
+                        if not usage or not model:
+                            continue
+                        events.append(make_event(
+                            provider="ChatGPT / Codex",
+                            model=model,
+                            timestamp=record.get("timestamp"),
+                            source="codex-rollout",
+                            input_tokens=usage.get("input_tokens"),
+                            output_tokens=usage.get("output_tokens"),
+                            cache_read=usage.get("cached_input_tokens"),
+                            cache_write=usage.get("cache_write_input_tokens"),
+                            total=usage.get("total_tokens"),
+                            note="Codex per-turn response usage",
+                        ))
+            except OSError:
+                continue
+    return events
+
+
 def scan_codex() -> list[dict]:
+    rollout_events = scan_codex_rollouts()
+    if rollout_events:
+        return rollout_events
     if not CODEX_DB.exists():
         return []
     events = []
@@ -130,7 +176,7 @@ def scan_codex() -> list[dict]:
             timestamp=row["updated_at"],
             source="codex-local",
             total=row["tokens_used"],
-            note="Codex thread total assigned to its last-updated date",
+            note="Fallback: Codex thread total assigned to its last-updated date",
         ))
     return events
 
@@ -326,7 +372,7 @@ def build_payload() -> dict:
         "notes": [
             "Claude costs use Anthropic standard global API pricing.",
             "Claude cache writes use the 5-minute rate because local logs omit TTL.",
-            "Codex thread totals are assigned to each thread's last-updated date for period views.",
+            "Codex uses per-turn rollout usage when available; SQLite thread totals are a fallback.",
         ],
     }
 
@@ -401,6 +447,8 @@ def model_report(payload: dict, breakdown: bool) -> None:
         print("-" * 83)
         for model in payload["models"]:
             print(f"{model['model']:<24} {format_tokens(model['input_tokens']):>10} {format_tokens(model['output_tokens']):>10} {format_tokens(model['cache_read_tokens']):>12} {format_tokens(model['cache_write_tokens']):>13} {model['events']:>8}")
+        print()
+        print("Note: Codex cache read is included inside Input and is shown separately, not added again.")
 
 
 def ingest(stdin) -> int:

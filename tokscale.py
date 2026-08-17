@@ -8,7 +8,8 @@ import json
 import os
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from itertools import chain
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -24,25 +25,16 @@ LOCAL_TZ = ZoneInfo(os.environ.get("TOKSCALE_TZ", "Europe/Oslo"))
 
 # USD per million tokens. Claude cache writes use the 5-minute rate because
 # local transcripts do not record the cache TTL.
+TOKEN_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+)
 CLAUDE_RATES = {
-    "claude-fable-5": {
-        "input": 10.0,
-        "output": 50.0,
-        "cache_read": 1.0,
-        "cache_write": 12.5,
-    },
-    "claude-opus-5": {
-        "input": 5.0,
-        "output": 25.0,
-        "cache_read": 0.5,
-        "cache_write": 6.25,
-    },
-    "claude-sonnet-5": {
-        "input": 2.0,
-        "output": 10.0,
-        "cache_read": 0.2,
-        "cache_write": 2.5,
-    },
+    "claude-fable-5": (10.0, 50.0, 1.0, 12.5),
+    "claude-opus-5": (5.0, 25.0, 0.5, 6.25),
+    "claude-sonnet-5": (2.0, 10.0, 0.2, 2.5),
 }
 
 # API-equivalent USD per million total tokens used by this report.
@@ -99,9 +91,8 @@ def usage_event(
     }
 
 
-def scan_codex_rollouts() -> list[dict]:
+def scan_codex_rollouts():
     """Read per-turn usage; cached input is part of input, not extra tokens."""
-    events = []
     for base in CODEX_DIRS:
         if not base.exists():
             continue
@@ -120,50 +111,49 @@ def scan_codex_rollouts() -> list[dict]:
                         usage = (payload.get("info") or {}).get("last_token_usage")
                         if not model or not usage:
                             continue
-                        events.append(
-                            usage_event(
-                                model,
-                                record.get("timestamp"),
-                                input_tokens=usage.get("input_tokens"),
-                                output_tokens=usage.get("output_tokens"),
-                                cache_read=usage.get("cached_input_tokens"),
-                                cache_write=usage.get("cache_write_input_tokens"),
-                                total=usage.get("total_tokens"),
-                            )
+                        yield usage_event(
+                            model,
+                            record.get("timestamp"),
+                            input_tokens=usage.get("input_tokens"),
+                            output_tokens=usage.get("output_tokens"),
+                            cache_read=usage.get("cached_input_tokens"),
+                            cache_write=usage.get("cache_write_input_tokens"),
+                            total=usage.get("total_tokens"),
                         )
             except OSError:
                 continue
-    return events
 
 
-def scan_codex() -> list[dict]:
-    events = scan_codex_rollouts()
-    if events or not CODEX_DB.exists():
-        return events
+def scan_codex():
+    rollouts = iter(scan_codex_rollouts())
+    first = next(rollouts, None)
+    if first is not None:
+        yield first
+        yield from rollouts
+        return
+    if not CODEX_DB.exists():
+        return
 
+    database = None
     try:
         database = sqlite3.connect(f"file:{CODEX_DB}?mode=ro", uri=True)
         database.row_factory = sqlite3.Row
-        rows = database.execute(
+        for row in database.execute(
             "SELECT model, updated_at, tokens_used "
             "FROM threads WHERE tokens_used > 0"
-        ).fetchall()
-        database.close()
+        ):
+            yield usage_event(row["model"], row["updated_at"], total=row["tokens_used"])
     except sqlite3.Error as error:
         print(f"warning: could not read Codex database: {error}", file=sys.stderr)
-        return []
-
-    return [
-        usage_event(row["model"], row["updated_at"], total=row["tokens_used"])
-        for row in rows
-    ]
+    finally:
+        if database is not None:
+            database.close()
 
 
-def scan_claude() -> list[dict]:
+def scan_claude():
     if not CLAUDE_PROJECTS.exists():
-        return []
+        return
 
-    events = []
     for path in CLAUDE_PROJECTS.rglob("*.jsonl"):
         try:
             with path.open("r", encoding="utf-8", errors="replace") as stream:
@@ -179,61 +169,64 @@ def scan_claude() -> list[dict]:
                     model = message.get("model")
                     if not usage or not model or model == "<synthetic>":
                         continue
-                    events.append(
-                        usage_event(
-                            model,
-                            record.get("timestamp"),
-                            input_tokens=usage.get("input_tokens"),
-                            output_tokens=usage.get("output_tokens"),
-                            cache_read=usage.get("cache_read_input_tokens"),
-                            cache_write=usage.get("cache_creation_input_tokens"),
-                        )
+                    yield usage_event(
+                        model,
+                        record.get("timestamp"),
+                        input_tokens=usage.get("input_tokens"),
+                        output_tokens=usage.get("output_tokens"),
+                        cache_read=usage.get("cache_read_input_tokens"),
+                        cache_write=usage.get("cache_creation_input_tokens"),
                     )
         except OSError:
             continue
-    return events
 
 
 def event_cost(event: dict) -> float | None:
     model = event["model"]
     if model in CLAUDE_RATES:
-        rate = CLAUDE_RATES[model]
-        return (
-            event["input_tokens"] * rate["input"]
-            + event["output_tokens"] * rate["output"]
-            + event["cache_read_tokens"] * rate["cache_read"]
-            + event["cache_write_tokens"] * rate["cache_write"]
+        return sum(
+            event[field] * rate
+            for field, rate in zip(TOKEN_FIELDS, CLAUDE_RATES[model])
         ) / 1_000_000
     if model in OPENAI_RATES:
         return event["tokens"] * OPENAI_RATES[model] / 1_000_000
     return None
 
 
-def collect() -> tuple[list[dict], datetime | None, datetime | None]:
-    events = scan_codex() + scan_claude()
+def period_start(period: str) -> datetime | None:
+    if period == "all":
+        return None
+    now = datetime.now(LOCAL_TZ)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if period == "weekly":
+        return start - timedelta(days=start.weekday())
+    if period == "monthly":
+        return start.replace(day=1)
+    return start
+
+
+def collect(period: str) -> tuple[list[dict], datetime | None, datetime | None]:
+    since = period_start(period)
     models = {}
-    for event in events:
+    first = last = None
+    for event in chain(scan_codex(), scan_claude()):
+        timestamp = event["timestamp"]
+        if since and timestamp < since:
+            continue
+        first = timestamp if first is None or timestamp < first else first
+        last = timestamp if last is None or timestamp > last else last
         row = models.setdefault(
             event["model"],
             {
                 "model": event["model"],
                 "tokens": 0,
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "cache_read_tokens": 0,
-                "cache_write_tokens": 0,
+                **dict.fromkeys(TOKEN_FIELDS, 0),
                 "events": 0,
                 "cost": 0.0,
                 "cost_known": True,
             },
         )
-        for field in (
-            "tokens",
-            "input_tokens",
-            "output_tokens",
-            "cache_read_tokens",
-            "cache_write_tokens",
-        ):
+        for field in ("tokens", *TOKEN_FIELDS):
             row[field] += event[field]
         row["events"] += 1
         cost = event_cost(event)
@@ -242,9 +235,8 @@ def collect() -> tuple[list[dict], datetime | None, datetime | None]:
         else:
             row["cost"] += cost
 
-    dates = [event["timestamp"] for event in events]
     ordered = sorted(models.values(), key=lambda row: row["tokens"], reverse=True)
-    return ordered, min(dates, default=None), max(dates, default=None)
+    return ordered, first, last
 
 
 def format_tokens(value: int) -> str:
@@ -275,9 +267,9 @@ def interval(first: datetime | None, last: datetime | None) -> str:
     return first_label if first.date() == last.date() else f"{first_label} – {last_label}"
 
 
-def print_models(breakdown: bool) -> None:
-    models, first, last = collect()
-    print("tokscale · Models")
+def print_models(breakdown: bool, period: str) -> None:
+    models, first, last = collect(period)
+    print(f"tokscale · Models · {period}")
     print(f"range: {interval(first, last)}")
     print()
     print(f"{'Model':<30} {'Tokens':>12} {'Cost':>12}")
@@ -314,8 +306,15 @@ def main() -> None:
     commands = parser.add_subparsers(dest="command", required=True)
     models = commands.add_parser("models", help="show usage grouped by model")
     models.add_argument("--breakdown", action="store_true", help="show token categories")
+    models.add_argument(
+        "period",
+        nargs="?",
+        choices=("daily", "weekly", "monthly", "all"),
+        default="all",
+        help="current period to include (default: all)",
+    )
     args = parser.parse_args()
-    print_models(args.breakdown)
+    print_models(args.breakdown, args.period)
 
 
 if __name__ == "__main__":

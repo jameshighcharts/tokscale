@@ -574,9 +574,12 @@ fn interval(first: Option<DateTime<Utc>>, last: Option<DateTime<Utc>>, timezone:
     }
 }
 
-fn report(collector: Collector, breakdown: bool) {
+fn report(collector: Collector, breakdown: bool, limit: usize) {
     let mut rows: Vec<_> = collector.models.into_values().collect();
     rows.sort_unstable_by_key(|row| std::cmp::Reverse(row.total));
+    if limit > 0 {
+        rows.truncate(limit);
+    }
     let model_width = rows
         .iter()
         .map(|row| row.model.chars().count())
@@ -634,19 +637,27 @@ fn report(collector: Collector, breakdown: bool) {
     println!("\nnote: codex cache read is included inside input and is not added twice.");
 }
 
-fn arguments() -> (bool, String) {
+fn arguments() -> (bool, String, usize) {
     let mut args = env::args().skip(1);
     if args.next().as_deref() != Some("models") {
-        eprintln!("usage: tokscale-rust models [--breakdown] [--daily|--weekly|--monthly|--all]");
+        eprintln!(
+            "usage: tokscale-rust models [--breakdown] [--daily|--daily3|--weekly|--monthly|--all]"
+        );
         process::exit(2);
     }
     let mut breakdown = false;
     let mut period = "all".to_owned();
+    let mut limit = 0;
     for argument in args {
         match argument.as_str() {
             "--breakdown" => breakdown = true,
+            "--daily3" => {
+                period = "daily".to_owned();
+                limit = 3;
+            }
             "--daily" | "--weekly" | "--monthly" | "--all" => {
-                period = argument.trim_start_matches("--").to_owned()
+                period = argument.trim_start_matches("--").to_owned();
+                limit = 0;
             }
             _ => {
                 eprintln!("unknown argument: {argument}");
@@ -654,11 +665,11 @@ fn arguments() -> (bool, String) {
             }
         }
     }
-    (breakdown, period)
+    (breakdown, period, limit)
 }
 
 fn main() {
-    let (breakdown, period) = arguments();
+    let (breakdown, period, limit) = arguments();
     let home = env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
@@ -680,7 +691,7 @@ fn main() {
     scan_claude(&home, &mut collector);
     scan_pi(&home, &mut collector);
     scan_antigravity(&home, &mut collector);
-    report(collector, breakdown);
+    report(collector, breakdown, limit);
 }
 
 #[cfg(test)]

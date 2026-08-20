@@ -374,8 +374,9 @@ def interval(first: datetime | None, last: datetime | None) -> str:
     return first_label if first.date() == last.date() else f"{first_label} – {last_label}"
 
 
-def print_models(breakdown: bool, period: str) -> None:
+def print_models(breakdown: bool, period: str, limit: int | None = None) -> None:
     models, first, last = collect(period)
+    models = models[:limit]
     model_width = max((len(row["label"]) for row in models), default=5)
     model_width = max(model_width, len("model"))
     print(f"tokscale · models · {period}")
@@ -421,8 +422,10 @@ def main() -> None:
     periods = models.add_mutually_exclusive_group()
     for period in ("daily", "weekly", "monthly", "all"):
         periods.add_argument(f"--{period}", dest="period", action="store_const", const=period)
+    periods.add_argument("--daily3", action="store_true", help="show today's top three models")
     args = parser.parse_args()
-    print_models(args.breakdown, args.period or "all")
+    period, limit = ("daily", 3) if args.daily3 else (args.period or "all", None)
+    print_models(args.breakdown, period, limit)
 
 
 if __name__ == "__main__":

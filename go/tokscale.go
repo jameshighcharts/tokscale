@@ -466,12 +466,15 @@ func interval(first, last time.Time) string {
 	return start + " – " + end
 }
 
-func report(c *collector, breakdown bool) {
+func report(c *collector, breakdown bool, limit int) {
 	rows := make([]*totals, 0, len(c.models))
 	for _, row := range c.models {
 		rows = append(rows, row)
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].total > rows[j].total })
+	if limit > 0 && len(rows) > limit {
+		rows = rows[:limit]
+	}
 	modelWidth := len("model")
 	for _, row := range rows {
 		if width := len([]rune(row.model)); width > modelWidth {
@@ -497,29 +500,31 @@ func report(c *collector, breakdown bool) {
 	fmt.Println("\nnote: codex cache read is included inside input and is not added twice.")
 }
 
-func arguments() (bool, string) {
+func arguments() (bool, string, int) {
 	args := os.Args[1:]
 	if len(args) == 0 || args[0] != "models" {
-		fmt.Fprintln(os.Stderr, "usage: tokscale-go models [--breakdown] [--daily|--weekly|--monthly|--all]")
+		fmt.Fprintln(os.Stderr, "usage: tokscale-go models [--breakdown] [--daily|--daily3|--weekly|--monthly|--all]")
 		os.Exit(2)
 	}
-	breakdown, period := false, "all"
+	breakdown, period, limit := false, "all", 0
 	for _, arg := range args[1:] {
 		switch arg {
 		case "--breakdown":
 			breakdown = true
+		case "--daily3":
+			period, limit = "daily", 3
 		case "--daily", "--weekly", "--monthly", "--all":
-			period = strings.TrimPrefix(arg, "--")
+			period, limit = strings.TrimPrefix(arg, "--"), 0
 		default:
 			fmt.Fprintf(os.Stderr, "unknown argument: %s\n", arg)
 			os.Exit(2)
 		}
 	}
-	return breakdown, period
+	return breakdown, period, limit
 }
 
 func main() {
-	breakdown, period := arguments()
+	breakdown, period, limit := arguments()
 	home, err := os.UserHomeDir()
 	if err != nil {
 		panic(err)
@@ -532,5 +537,5 @@ func main() {
 	scanClaude(home, c)
 	scanPi(home, c)
 	scanAntigravity(home, c)
-	report(c, breakdown)
+	report(c, breakdown, limit)
 }

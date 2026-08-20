@@ -252,10 +252,11 @@ impl Collector {
         }
         let cost = event_cost(&event);
         let key = format!("{}\0{}", event.provider, event.model);
-        let label = if event.provider == "codex" || event.provider == "claude" {
-            event.model.clone()
-        } else {
-            format!("{}/{}", event.provider, event.model)
+        let label = match event.provider.as_str() {
+            "antigravity" => format!("agy-{}", event.model),
+            "openrouter" => format!("or-{}", event.model),
+            "pi" => format!("pi-{}", event.model),
+            _ => event.model.clone(),
         };
         let row = self.models.entry(key).or_insert_with(|| Totals {
             model: label,
@@ -538,48 +539,58 @@ fn interval(first: Option<DateTime<Utc>>, last: Option<DateTime<Utc>>, timezone:
 fn report(collector: Collector, breakdown: bool) {
     let mut rows: Vec<_> = collector.models.into_values().collect();
     rows.sort_unstable_by_key(|row| std::cmp::Reverse(row.total));
+    let model_width = rows
+        .iter()
+        .map(|row| row.model.chars().count())
+        .max()
+        .unwrap_or(5)
+        .max(5);
     println!(
         "tokscale · Models · {}\nrange: {}\n",
         collector.period,
         interval(collector.first, collector.last, collector.timezone)
     );
     println!(
-        "{:<30} {:>12} {:>12}\n{}",
+        "{:<width$} {:>12} {:>12}\n{}",
         "Model",
         "Tokens",
         "Cost",
-        "-".repeat(58)
+        "-".repeat(model_width + 1 + 12 + 1 + 12),
+        width = model_width
     );
     for row in &rows {
         println!(
-            "{:<30} {:>12} {:>12}",
+            "{:<width$} {:>12} {:>12}",
             row.model,
             token_text(row.total),
-            cost_text(row)
+            cost_text(row),
+            width = model_width
         );
     }
     if !breakdown {
         return;
     }
     println!(
-        "\nBreakdown\n---------\n{:<24} {:>10} {:>10} {:>12} {:>13} {:>8}\n{}",
+        "\nBreakdown\n---------\n{:<width$} {:>10} {:>10} {:>12} {:>13} {:>8}\n{}",
         "Model",
         "Input",
         "Output",
         "Cache read",
         "Cache write",
         "Events",
-        "-".repeat(83)
+        "-".repeat(model_width + 1 + 10 + 1 + 10 + 1 + 12 + 1 + 13 + 1 + 8),
+        width = model_width
     );
     for row in &rows {
         println!(
-            "{:<24} {:>10} {:>10} {:>12} {:>13} {:>8}",
+            "{:<width$} {:>10} {:>10} {:>12} {:>13} {:>8}",
             row.model,
             token_text(row.input),
             token_text(row.output),
             token_text(row.read),
             token_text(row.write),
-            row.events
+            row.events,
+            width = model_width
         );
     }
     println!("\nNote: Codex cache read is included inside Input and is not added twice.");

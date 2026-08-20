@@ -34,8 +34,13 @@ TOKEN_FIELDS = (
 
 def aggregate_days() -> list[dict]:
     rows: dict[tuple[str, str, str], dict] = {}
-    for event in chain(tokscale.scan_codex(), tokscale.scan_claude()):
-        provider = "claude" if event["model"].startswith("claude-") else "codex"
+    for event in chain(
+        tokscale.scan_codex(),
+        tokscale.scan_claude(),
+        tokscale.scan_pi(),
+        tokscale.scan_antigravity(),
+    ):
+        provider = event["provider"]
         key = (event["timestamp"].date().isoformat(), provider, event["model"])
         row = rows.setdefault(
             key,

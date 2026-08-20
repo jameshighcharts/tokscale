@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print local Codex and Claude token usage by model."""
+"""Print local AI CLI token usage by model."""
 
 from __future__ import annotations
 
@@ -21,6 +21,8 @@ CODEX_DIRS = (
     USER_HOME / ".codex" / "archived_sessions",
 )
 CLAUDE_PROJECTS = USER_HOME / ".claude" / "projects"
+PI_SESSIONS = USER_HOME / ".pi" / "agent" / "sessions"
+ANTIGRAVITY_USAGE_LOG = USER_HOME / ".gemini" / "antigravity-cli" / "tokscale-usage.jsonl"
 LOCAL_TZ = ZoneInfo(os.environ.get("TOKSCALE_TZ", "Europe/Oslo"))
 
 # USD per million tokens. Claude cache writes use the 5-minute rate because
@@ -44,12 +46,46 @@ OPENAI_RATES = {
     "gpt-5.6-luna": 0.0177545,
 }
 
+# API-equivalent proxy rates for Antigravity's Gemini models, USD per million
+# tokens. Gemini 3.6/3.7 introductory standard pricing applies through 2026.
+GEMINI_PROXY_RATES = {
+    "gemini-3.7-flash": (0.75, 3.75, 0.075),
+    "gemini-3.6-flash": (0.75, 3.75, 0.075),
+    "gemini-3.5-flash": (1.5, 9.0, 0.15),
+}
+
+PROVIDER_PREFIXES = {
+    "antigravity": "agy",
+    "openrouter": "or",
+}
+
 
 def positive_int(value) -> int:
     try:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
         return 0
+
+
+def slug(value: str) -> str:
+    return "".join(
+        "-" if character.isspace() or character == "/" else character.lower()
+        for character in value
+    )
+
+
+def display_label(provider: str, model: str) -> str:
+    prefix = PROVIDER_PREFIXES.get(provider)
+    if prefix is None and provider not in ("codex", "claude"):
+        prefix = slug(provider)
+    model = slug(model)
+    return f"{prefix}-{model}" if prefix else model
+
+
+def counter_delta(current: int, previous: int) -> int:
+    """Return growth since the prior snapshot, including a reset baseline."""
+    current = positive_int(current)
+    return current if current < previous else current - previous
 
 
 def local_time(value) -> datetime:
@@ -65,15 +101,30 @@ def local_time(value) -> datetime:
     return parsed.astimezone(LOCAL_TZ)
 
 
+def jsonl_records(paths):
+    for path in paths:
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as stream:
+                for line in stream:
+                    try:
+                        yield json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            continue
+
+
 def usage_event(
     model,
     timestamp,
     *,
+    provider=None,
     input_tokens=0,
     output_tokens=0,
     cache_read=0,
     cache_write=0,
     total=None,
+    cost_usd=None,
 ) -> dict:
     input_tokens = positive_int(input_tokens)
     output_tokens = positive_int(output_tokens)
@@ -82,46 +133,38 @@ def usage_event(
     calculated_total = input_tokens + output_tokens + cache_read + cache_write
     return {
         "model": model or "unknown",
+        "provider": provider or "unknown",
         "timestamp": local_time(timestamp),
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "cache_read_tokens": cache_read,
         "cache_write_tokens": cache_write,
         "tokens": positive_int(total) if total is not None else calculated_total,
+        "cost_usd": float(cost_usd) if cost_usd is not None else None,
     }
 
 
 def scan_codex_rollouts():
     """Read per-turn usage; cached input is part of input, not extra tokens."""
     for base in CODEX_DIRS:
-        if not base.exists():
-            continue
-        for path in base.rglob("*.jsonl"):
-            model = None
-            try:
-                with path.open("r", encoding="utf-8", errors="replace") as stream:
-                    for line in stream:
-                        try:
-                            record = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        payload = record.get("payload") or {}
-                        if record.get("type") == "turn_context" and payload.get("model"):
-                            model = payload["model"]
-                        usage = (payload.get("info") or {}).get("last_token_usage")
-                        if not model or not usage:
-                            continue
-                        yield usage_event(
-                            model,
-                            record.get("timestamp"),
-                            input_tokens=usage.get("input_tokens"),
-                            output_tokens=usage.get("output_tokens"),
-                            cache_read=usage.get("cached_input_tokens"),
-                            cache_write=usage.get("cache_write_input_tokens"),
-                            total=usage.get("total_tokens"),
-                        )
-            except OSError:
+        model = None
+        for record in jsonl_records(base.rglob("*.jsonl")):
+            payload = record.get("payload") or {}
+            if record.get("type") == "turn_context" and payload.get("model"):
+                model = payload["model"]
+            usage = (payload.get("info") or {}).get("last_token_usage")
+            if not model or not usage:
                 continue
+            yield usage_event(
+                model,
+                record.get("timestamp"),
+                provider="codex",
+                input_tokens=usage.get("input_tokens"),
+                output_tokens=usage.get("output_tokens"),
+                cache_read=usage.get("cached_input_tokens"),
+                cache_write=usage.get("cache_write_input_tokens"),
+                total=usage.get("total_tokens"),
+            )
 
 
 def scan_codex():
@@ -142,7 +185,9 @@ def scan_codex():
             "SELECT model, updated_at, tokens_used "
             "FROM threads WHERE tokens_used > 0"
         ):
-            yield usage_event(row["model"], row["updated_at"], total=row["tokens_used"])
+            yield usage_event(
+                row["model"], row["updated_at"], provider="codex", total=row["tokens_used"]
+            )
     except sqlite3.Error as error:
         print(f"warning: could not read Codex database: {error}", file=sys.stderr)
     finally:
@@ -151,38 +196,97 @@ def scan_codex():
 
 
 def scan_claude():
-    if not CLAUDE_PROJECTS.exists():
-        return
-
-    for path in CLAUDE_PROJECTS.rglob("*.jsonl"):
-        try:
-            with path.open("r", encoding="utf-8", errors="replace") as stream:
-                for line in stream:
-                    try:
-                        record = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if record.get("type") != "assistant":
-                        continue
-                    message = record.get("message") or {}
-                    usage = message.get("usage") or {}
-                    model = message.get("model")
-                    if not usage or not model or model == "<synthetic>":
-                        continue
-                    yield usage_event(
-                        model,
-                        record.get("timestamp"),
-                        input_tokens=usage.get("input_tokens"),
-                        output_tokens=usage.get("output_tokens"),
-                        cache_read=usage.get("cache_read_input_tokens"),
-                        cache_write=usage.get("cache_creation_input_tokens"),
-                    )
-        except OSError:
+    for record in jsonl_records(CLAUDE_PROJECTS.rglob("*.jsonl")):
+        if record.get("type") != "assistant":
             continue
+        message = record.get("message") or {}
+        usage = message.get("usage") or {}
+        model = message.get("model")
+        if not usage or not model or model == "<synthetic>":
+            continue
+        yield usage_event(
+            model,
+            record.get("timestamp"),
+            provider="claude",
+            input_tokens=usage.get("input_tokens"),
+            output_tokens=usage.get("output_tokens"),
+            cache_read=usage.get("cache_read_input_tokens"),
+            cache_write=usage.get("cache_creation_input_tokens"),
+        )
+
+
+def scan_pi():
+    """Read Pi assistant responses, including provider and OpenRouter cost."""
+    for record in jsonl_records(PI_SESSIONS.rglob("*.jsonl")):
+        message = record.get("message") or {}
+        usage = message.get("usage") or {}
+        if record.get("type") != "message" or message.get("role") != "assistant":
+            continue
+        model = message.get("model")
+        if not model or not usage:
+            continue
+        yield usage_event(
+            model,
+            record.get("timestamp"),
+            provider=message.get("provider") or "pi",
+            input_tokens=usage.get("input"),
+            output_tokens=usage.get("output"),
+            cache_read=usage.get("cacheRead"),
+            cache_write=usage.get("cacheWrite"),
+            total=usage.get("totalTokens"),
+            cost_usd=(usage.get("cost") or {}).get("total"),
+        )
+
+
+def scan_antigravity():
+    """Read opt-in status-line snapshots and emit cumulative deltas per turn."""
+    snapshots = {}
+    for record in jsonl_records((ANTIGRAVITY_USAGE_LOG,)):
+        payload = record.get("payload") or record
+        context = payload.get("context_window") or {}
+        conversation = (
+            payload.get("conversation_id")
+            or payload.get("session_id")
+            or payload.get("transcript_path")
+        )
+        model_info = payload.get("model") or {}
+        model = model_info.get("id") or model_info.get("display_name")
+        timestamp = record.get("captured_at") or payload.get("created_at")
+        if not conversation or not model or not timestamp:
+            continue
+        totals = (
+            positive_int(context.get("total_input_tokens")),
+            positive_int(context.get("total_output_tokens")),
+        )
+        if not any(totals):
+            continue
+        previous = snapshots.get(conversation, (0, 0))
+        snapshots[conversation] = totals
+        delta_input, delta_output = map(counter_delta, totals, previous)
+        if delta_input or delta_output:
+            yield usage_event(
+                model,
+                timestamp,
+                provider="antigravity",
+                input_tokens=delta_input,
+                output_tokens=delta_output,
+                total=delta_input + delta_output,
+            )
 
 
 def event_cost(event: dict) -> float | None:
+    if event.get("cost_usd") is not None:
+        return max(0.0, float(event["cost_usd"]))
     model = event["model"]
+    if event.get("provider") == "antigravity":
+        normalized = model.lower().replace(" ", "-")
+        for name, rates in GEMINI_PROXY_RATES.items():
+            if name in normalized:
+                return (
+                    event["input_tokens"] * rates[0]
+                    + event["output_tokens"] * rates[1]
+                    + event["cache_read_tokens"] * rates[2]
+                ) / 1_000_000
     if model in CLAUDE_RATES:
         return sum(
             event[field] * rate
@@ -209,16 +313,19 @@ def collect(period: str) -> tuple[list[dict], datetime | None, datetime | None]:
     since = period_start(period)
     models = {}
     first = last = None
-    for event in chain(scan_codex(), scan_claude()):
+    for event in chain(scan_codex(), scan_claude(), scan_pi(), scan_antigravity()):
         timestamp = event["timestamp"]
         if since and timestamp < since:
             continue
         first = timestamp if first is None or timestamp < first else first
         last = timestamp if last is None or timestamp > last else last
+        key = (event["provider"], event["model"])
         row = models.setdefault(
-            event["model"],
+            key,
             {
                 "model": event["model"],
+                "provider": event["provider"],
+                "label": display_label(event["provider"], event["model"]),
                 "tokens": 0,
                 **dict.fromkeys(TOKEN_FIELDS, 0),
                 "events": 0,
@@ -261,7 +368,7 @@ def format_cost(value: float, known: bool) -> str:
 
 def interval(first: datetime | None, last: datetime | None) -> str:
     if not first or not last:
-        return "No data"
+        return "no data"
     first_label = f"{first.strftime('%b')} {first.day}"
     last_label = f"{last.strftime('%b')} {last.day}"
     return first_label if first.date() == last.date() else f"{first_label} – {last_label}"
@@ -269,28 +376,33 @@ def interval(first: datetime | None, last: datetime | None) -> str:
 
 def print_models(breakdown: bool, period: str) -> None:
     models, first, last = collect(period)
-    print(f"tokscale · Models · {period}")
+    model_width = max((len(row["label"]) for row in models), default=5)
+    model_width = max(model_width, len("model"))
+    print(f"tokscale · models · {period}")
     print(f"range: {interval(first, last)}")
     print()
-    print(f"{'Model':<30} {'Tokens':>12} {'Cost':>12}")
-    print("-" * 58)
+    print(f"{'model':<{model_width}} {'tokens':>12} {'cost':>12}")
+    print("-" * (model_width + 26))
     for model in models:
         cost = format_cost(model["cost"], model["cost_known"])
-        print(f"{model['model']:<30} {format_tokens(model['tokens']):>12} {cost:>12}")
+        print(
+            f"{model['label']:<{model_width}} "
+            f"{format_tokens(model['tokens']):>12} {cost:>12}"
+        )
 
     if not breakdown:
         return
     print()
-    print("Breakdown")
+    print("breakdown")
     print("---------")
     print(
-        f"{'Model':<24} {'Input':>10} {'Output':>10} "
-        f"{'Cache read':>12} {'Cache write':>13} {'Events':>8}"
+        f"{'model':<{model_width}} {'input':>10} {'output':>10} "
+        f"{'cache read':>12} {'cache write':>13} {'events':>8}"
     )
-    print("-" * 83)
+    print("-" * (model_width + 58))
     for model in models:
         print(
-            f"{model['model']:<24} "
+            f"{model['label']:<{model_width}} "
             f"{format_tokens(model['input_tokens']):>10} "
             f"{format_tokens(model['output_tokens']):>10} "
             f"{format_tokens(model['cache_read_tokens']):>12} "
@@ -298,11 +410,11 @@ def print_models(breakdown: bool, period: str) -> None:
             f"{model['events']:>8}"
         )
     print()
-    print("Note: Codex cache read is included inside Input and is not added twice.")
+    print("note: codex cache read is included inside input and is not added twice.")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Report local Codex and Claude token usage")
+    parser = argparse.ArgumentParser(description="Report local AI CLI token usage")
     commands = parser.add_subparsers(dest="command", required=True)
     models = commands.add_parser("models", help="show usage grouped by model")
     models.add_argument("--breakdown", action="store_true", help="show token categories")

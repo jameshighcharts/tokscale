@@ -180,7 +180,17 @@ fn display_label(provider: &str, model: &str) -> String {
         "pi" => "pi-",
         _ => "",
     };
-    format!("{}{}", prefix, model.replace('/', "-").to_lowercase())
+    let normalized = model
+        .chars()
+        .map(|character| {
+            if character.is_whitespace() || character == '/' {
+                '-'
+            } else {
+                character.to_ascii_lowercase()
+            }
+        })
+        .collect::<String>();
+    format!("{}{}", prefix, normalized)
 }
 
 fn parse_time(value: &Value) -> DateTime<Utc> {

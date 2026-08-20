@@ -121,6 +121,14 @@ var openAIRates = map[string]float64{
 	"gpt-5.6-luna":      .0177545,
 }
 
+// API-equivalent proxy rates for Antigravity's Gemini models, USD per million
+// tokens. Gemini 3.6/3.7 introductory standard pricing applies through 2026.
+var geminiProxyRates = map[string][3]float64{
+	"gemini-3.7-flash": {.75, 3.75, .075},
+	"gemini-3.6-flash": {.75, 3.75, .075},
+	"gemini-3.5-flash": {1.5, 9, .15},
+}
+
 func location() *time.Location {
 	name := os.Getenv("TOKSCALE_TZ")
 	if name == "" {
@@ -175,6 +183,15 @@ func (c *collector) includes(t time.Time) bool {
 func eventCost(e event) (float64, bool) {
 	if e.hasCost {
 		return e.cost, true
+	}
+	if e.provider == "antigravity" {
+		model := strings.ReplaceAll(strings.ToLower(e.model), " ", "-")
+		for name, rate := range geminiProxyRates {
+			if strings.Contains(model, name) {
+				return (float64(e.input)*rate[0] + float64(e.output)*rate[1] +
+					float64(e.read)*rate[2]) / 1e6, true
+			}
+		}
 	}
 	if rate, ok := claudeRates[e.model]; ok {
 		return (float64(e.input)*rate[0] + float64(e.output)*rate[1] +

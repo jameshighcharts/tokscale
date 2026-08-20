@@ -227,6 +227,24 @@ fn event_cost(event: &Event) -> Option<f64> {
     if let Some(cost) = event.cost {
         return Some(cost.max(0.0));
     }
+    if event.provider == "antigravity" {
+        let model = event.model.to_ascii_lowercase().replace(' ', "-");
+        let rate = if model.contains("gemini-3.7-flash") || model.contains("gemini-3.6-flash") {
+            Some([0.75, 3.75, 0.075])
+        } else if model.contains("gemini-3.5-flash") {
+            Some([1.5, 9.0, 0.15])
+        } else {
+            None
+        };
+        if let Some(rate) = rate {
+            return Some(
+                (event.input as f64 * rate[0]
+                    + event.output as f64 * rate[1]
+                    + event.read as f64 * rate[2])
+                    / 1_000_000.0,
+            );
+        }
+    }
     let rate = match event.model.as_str() {
         "claude-fable-5" => Some([10.0, 50.0, 1.0, 12.5]),
         "claude-opus-5" => Some([5.0, 25.0, 0.5, 6.25]),

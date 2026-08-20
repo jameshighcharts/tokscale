@@ -46,6 +46,14 @@ OPENAI_RATES = {
     "gpt-5.6-luna": 0.0177545,
 }
 
+# API-equivalent proxy rates for Antigravity's Gemini models, USD per million
+# tokens. Gemini 3.6/3.7 introductory standard pricing applies through 2026.
+GEMINI_PROXY_RATES = {
+    "gemini-3.7-flash": (0.75, 3.75, 0.075),
+    "gemini-3.6-flash": (0.75, 3.75, 0.075),
+    "gemini-3.5-flash": (1.5, 9.0, 0.15),
+}
+
 
 def positive_int(value) -> int:
     try:
@@ -279,6 +287,15 @@ def event_cost(event: dict) -> float | None:
     if event.get("cost_usd") is not None:
         return max(0.0, float(event["cost_usd"]))
     model = event["model"]
+    if event.get("provider") == "antigravity":
+        normalized = model.lower().replace(" ", "-")
+        for name, rates in GEMINI_PROXY_RATES.items():
+            if name in normalized:
+                return (
+                    event["input_tokens"] * rates[0]
+                    + event["output_tokens"] * rates[1]
+                    + event["cache_read_tokens"] * rates[2]
+                ) / 1_000_000
     if model in CLAUDE_RATES:
         return sum(
             event[field] * rate

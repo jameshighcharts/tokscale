@@ -65,8 +65,11 @@ The tools use per-turn Codex rollout usage, with its SQLite database as a
 fallback. Claude pricing includes input, output, cache-read, and five-minute
 cache-write rates. Codex cached input is displayed separately but is already
 included in input and is never counted twice. Pi/OpenRouter costs come from
-Pi's recorded response cost. Antigravity cost remains unknown because it is a
-subscription quota rather than an API invoice.
+Pi's recorded response cost. Antigravity costs use an API-equivalent Gemini
+pricing proxy; they are estimates, not charges on the Antigravity subscription.
+The current Gemini 3.6/3.7 Flash standard proxy is $0.75 per million input
+tokens and $3.75 per million output tokens through 2026, matching Google's
+published [Gemini API pricing](https://ai.google.dev/gemini-api/docs/pricing).
 
 ## Account scope
 

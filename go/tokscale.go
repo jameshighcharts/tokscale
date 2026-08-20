@@ -40,11 +40,57 @@ type record struct {
 	} `json:"message"`
 }
 
+type piRecord struct {
+	Type      string `json:"type"`
+	Timestamp any    `json:"timestamp"`
+	Message   struct {
+		Role     string   `json:"role"`
+		Provider string   `json:"provider"`
+		Model    string   `json:"model"`
+		Usage    *piUsage `json:"usage"`
+	} `json:"message"`
+}
+
+type piUsage struct {
+	Input      int64   `json:"input"`
+	Output     int64   `json:"output"`
+	CacheRead  int64   `json:"cacheRead"`
+	CacheWrite int64   `json:"cacheWrite"`
+	Total      int64   `json:"totalTokens"`
+	Cost       *piCost `json:"cost"`
+}
+
+type piCost struct {
+	Total float64 `json:"total"`
+}
+
+type antigravityRecord struct {
+	CapturedAt     string `json:"captured_at"`
+	ConversationID string `json:"conversation_id"`
+	SessionID      string `json:"session_id"`
+	TranscriptPath string `json:"transcript_path"`
+	Model          struct {
+		ID          string `json:"id"`
+		DisplayName string `json:"display_name"`
+	} `json:"model"`
+	ContextWindow struct {
+		Input  int64 `json:"total_input_tokens"`
+		Output int64 `json:"total_output_tokens"`
+	} `json:"context_window"`
+}
+
+type antigravitySnapshot struct {
+	input, output int64
+}
+
 type event struct {
+	provider                   string
 	model                      string
 	timestamp                  time.Time
 	input, output, read, write int64
 	total                      int64
+	cost                       float64
+	hasCost                    bool
 }
 
 type totals struct {
@@ -127,6 +173,9 @@ func (c *collector) includes(t time.Time) bool {
 }
 
 func eventCost(e event) (float64, bool) {
+	if e.hasCost {
+		return e.cost, true
+	}
 	if rate, ok := claudeRates[e.model]; ok {
 		return (float64(e.input)*rate[0] + float64(e.output)*rate[1] +
 			float64(e.read)*rate[2] + float64(e.write)*rate[3]) / 1e6, true
@@ -141,10 +190,15 @@ func (c *collector) add(e event) {
 	if !c.includes(e.timestamp) {
 		return
 	}
-	row := c.models[e.model]
+	key := e.provider + "\x00" + e.model
+	row := c.models[key]
 	if row == nil {
-		row = &totals{model: e.model, costKnown: true}
-		c.models[e.model] = row
+		label := e.model
+		if e.provider != "codex" && e.provider != "claude" {
+			label = e.provider + "/" + label
+		}
+		row = &totals{model: label, costKnown: true}
+		c.models[key] = row
 	}
 	row.input += e.input
 	row.output += e.output
@@ -194,6 +248,11 @@ func claudeLine(line []byte) bool {
 		bytes.Contains(line, []byte(`"usage"`))
 }
 
+func piLine(line []byte) bool {
+	return bytes.Contains(line, []byte(`"assistant"`)) &&
+		bytes.Contains(line, []byte(`"usage"`))
+}
+
 func walkJSONL(root string, visit func(string)) {
 	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err == nil && !entry.IsDir() && strings.HasSuffix(path, ".jsonl") {
@@ -220,8 +279,8 @@ func scanCodex(home string, c *collector) int64 {
 				}
 				u := item.Payload.Info.Last
 				found++
-				c.add(event{model, parseTime(item.Timestamp, c.tz), u.Input, u.Output,
-					u.CachedInput, u.CacheWrite, u.Total})
+				c.add(event{provider: "codex", model: model, timestamp: parseTime(item.Timestamp, c.tz),
+					input: u.Input, output: u.Output, read: u.CachedInput, write: u.CacheWrite, total: u.Total})
 			})
 		})
 	}
@@ -242,7 +301,7 @@ func scanCodexSQLite(home string, c *collector) {
 		}
 		timestamp, _ := strconv.ParseFloat(parts[1], 64)
 		total, _ := strconv.ParseInt(parts[2], 10, 64)
-		c.add(event{model: parts[0], timestamp: parseTime(timestamp, c.tz), total: total})
+		c.add(event{provider: "codex", model: parts[0], timestamp: parseTime(timestamp, c.tz), total: total})
 	}
 }
 
@@ -253,10 +312,92 @@ func scanClaude(home string, c *collector) {
 			if item.Type != "assistant" || u == nil || model == "" || model == "<synthetic>" {
 				return
 			}
-			c.add(event{model, parseTime(item.Timestamp, c.tz), u.Input, u.Output,
-				u.CacheRead, u.CacheCreate, u.Input + u.Output + u.CacheRead + u.CacheCreate})
+			c.add(event{provider: "claude", model: model, timestamp: parseTime(item.Timestamp, c.tz),
+				input: u.Input, output: u.Output, read: u.CacheRead, write: u.CacheCreate,
+				total: u.Input + u.Output + u.CacheRead + u.CacheCreate})
 		})
 	})
+}
+
+func scanPi(home string, c *collector) {
+	walkJSONL(filepath.Join(home, ".pi", "agent", "sessions"), func(path string) {
+		file, err := os.Open(path)
+		if err != nil {
+			return
+		}
+		defer file.Close()
+		scanner := bufio.NewScanner(file)
+		scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
+		for scanner.Scan() {
+			if !piLine(scanner.Bytes()) {
+				continue
+			}
+			var item piRecord
+			if json.Unmarshal(scanner.Bytes(), &item) != nil || item.Type != "message" ||
+				item.Message.Role != "assistant" || item.Message.Model == "" || item.Message.Usage == nil {
+				continue
+			}
+			u := item.Message.Usage
+			provider := item.Message.Provider
+			if provider == "" {
+				provider = "pi"
+			}
+			cost, hasCost := 0.0, false
+			if u.Cost != nil {
+				cost, hasCost = u.Cost.Total, true
+			}
+			c.add(event{provider: provider, model: item.Message.Model, timestamp: parseTime(item.Timestamp, c.tz),
+				input: u.Input, output: u.Output, read: u.CacheRead, write: u.CacheWrite, total: u.Total,
+				cost: cost, hasCost: hasCost})
+		}
+	})
+}
+
+func scanAntigravity(home string, c *collector) {
+	path := filepath.Join(home, ".gemini", "antigravity-cli", "tokscale-usage.jsonl")
+	file, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	previous := make(map[string]antigravitySnapshot)
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
+	for scanner.Scan() {
+		var item antigravityRecord
+		if json.Unmarshal(scanner.Bytes(), &item) != nil || item.CapturedAt == "" {
+			continue
+		}
+		conversation := item.ConversationID
+		if conversation == "" {
+			conversation = item.SessionID
+		}
+		if conversation == "" {
+			conversation = item.TranscriptPath
+		}
+		model := item.Model.ID
+		if model == "" {
+			model = item.Model.DisplayName
+		}
+		if conversation == "" || model == "" {
+			continue
+		}
+		old := previous[conversation]
+		deltaInput := item.ContextWindow.Input - old.input
+		deltaOutput := item.ContextWindow.Output - old.output
+		if deltaInput < 0 {
+			deltaInput = item.ContextWindow.Input
+		}
+		if deltaOutput < 0 {
+			deltaOutput = item.ContextWindow.Output
+		}
+		previous[conversation] = antigravitySnapshot{item.ContextWindow.Input, item.ContextWindow.Output}
+		if deltaInput == 0 && deltaOutput == 0 {
+			continue
+		}
+		c.add(event{provider: "antigravity", model: model, timestamp: parseTime(item.CapturedAt, c.tz),
+			input: deltaInput, output: deltaOutput, total: deltaInput + deltaOutput})
+	}
 }
 
 func tokenText(value int64) string {
@@ -353,5 +494,7 @@ func main() {
 		scanCodexSQLite(home, c)
 	}
 	scanClaude(home, c)
+	scanPi(home, c)
+	scanAntigravity(home, c)
 	report(c, breakdown)
 }

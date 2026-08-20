@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print local Codex and Claude token usage by model."""
+"""Print local AI CLI token usage by model."""
 
 from __future__ import annotations
 
@@ -21,6 +21,8 @@ CODEX_DIRS = (
     USER_HOME / ".codex" / "archived_sessions",
 )
 CLAUDE_PROJECTS = USER_HOME / ".claude" / "projects"
+PI_SESSIONS = USER_HOME / ".pi" / "agent" / "sessions"
+ANTIGRAVITY_USAGE_LOG = USER_HOME / ".gemini" / "antigravity-cli" / "tokscale-usage.jsonl"
 LOCAL_TZ = ZoneInfo(os.environ.get("TOKSCALE_TZ", "Europe/Oslo"))
 
 # USD per million tokens. Claude cache writes use the 5-minute rate because
@@ -69,11 +71,13 @@ def usage_event(
     model,
     timestamp,
     *,
+    provider=None,
     input_tokens=0,
     output_tokens=0,
     cache_read=0,
     cache_write=0,
     total=None,
+    cost_usd=None,
 ) -> dict:
     input_tokens = positive_int(input_tokens)
     output_tokens = positive_int(output_tokens)
@@ -82,12 +86,14 @@ def usage_event(
     calculated_total = input_tokens + output_tokens + cache_read + cache_write
     return {
         "model": model or "unknown",
+        "provider": provider or "unknown",
         "timestamp": local_time(timestamp),
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "cache_read_tokens": cache_read,
         "cache_write_tokens": cache_write,
         "tokens": positive_int(total) if total is not None else calculated_total,
+        "cost_usd": float(cost_usd) if cost_usd is not None else None,
     }
 
 
@@ -114,6 +120,7 @@ def scan_codex_rollouts():
                         yield usage_event(
                             model,
                             record.get("timestamp"),
+                            provider="codex",
                             input_tokens=usage.get("input_tokens"),
                             output_tokens=usage.get("output_tokens"),
                             cache_read=usage.get("cached_input_tokens"),
@@ -142,7 +149,9 @@ def scan_codex():
             "SELECT model, updated_at, tokens_used "
             "FROM threads WHERE tokens_used > 0"
         ):
-            yield usage_event(row["model"], row["updated_at"], total=row["tokens_used"])
+            yield usage_event(
+                row["model"], row["updated_at"], provider="codex", total=row["tokens_used"]
+            )
     except sqlite3.Error as error:
         print(f"warning: could not read Codex database: {error}", file=sys.stderr)
     finally:
@@ -172,6 +181,7 @@ def scan_claude():
                     yield usage_event(
                         model,
                         record.get("timestamp"),
+                        provider="claude",
                         input_tokens=usage.get("input_tokens"),
                         output_tokens=usage.get("output_tokens"),
                         cache_read=usage.get("cache_read_input_tokens"),
@@ -181,7 +191,93 @@ def scan_claude():
             continue
 
 
+def scan_pi():
+    """Read Pi assistant responses, including provider and OpenRouter cost."""
+    if not PI_SESSIONS.exists():
+        return
+    for path in PI_SESSIONS.rglob("*.jsonl"):
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as stream:
+                for line in stream:
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    message = record.get("message") or {}
+                    usage = message.get("usage") or {}
+                    if record.get("type") != "message" or message.get("role") != "assistant":
+                        continue
+                    model = message.get("model")
+                    if not model or not usage:
+                        continue
+                    cost = usage.get("cost") or {}
+                    yield usage_event(
+                        model,
+                        record.get("timestamp"),
+                        provider=message.get("provider") or "pi",
+                        input_tokens=usage.get("input"),
+                        output_tokens=usage.get("output"),
+                        cache_read=usage.get("cacheRead"),
+                        cache_write=usage.get("cacheWrite"),
+                        total=usage.get("totalTokens"),
+                        cost_usd=cost.get("total"),
+                    )
+        except OSError:
+            continue
+
+
+def scan_antigravity():
+    """Read opt-in status-line snapshots and emit cumulative deltas per turn."""
+    if not ANTIGRAVITY_USAGE_LOG.exists():
+        return
+    snapshots = {}
+    try:
+        with ANTIGRAVITY_USAGE_LOG.open("r", encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                payload = record.get("payload") or record
+                context = payload.get("context_window") or {}
+                conversation = (
+                    payload.get("conversation_id")
+                    or payload.get("session_id")
+                    or payload.get("transcript_path")
+                )
+                model_info = payload.get("model") or {}
+                model = model_info.get("id") or model_info.get("display_name")
+                timestamp = record.get("captured_at") or payload.get("created_at")
+                if not conversation or not model or not timestamp:
+                    continue
+                input_total = positive_int(context.get("total_input_tokens"))
+                output_total = positive_int(context.get("total_output_tokens"))
+                if not input_total and not output_total:
+                    continue
+                current = (input_total, output_total, model, timestamp)
+                previous = snapshots.get(conversation)
+                snapshots[conversation] = current
+                if previous is None:
+                    delta_input, delta_output = input_total, output_total
+                else:
+                    delta_input = max(0, input_total - previous[0])
+                    delta_output = max(0, output_total - previous[1])
+                if delta_input or delta_output:
+                    yield usage_event(
+                        model,
+                        timestamp,
+                        provider="antigravity",
+                        input_tokens=delta_input,
+                        output_tokens=delta_output,
+                        total=delta_input + delta_output,
+                    )
+    except OSError:
+        return
+
+
 def event_cost(event: dict) -> float | None:
+    if event.get("cost_usd") is not None:
+        return max(0.0, float(event["cost_usd"]))
     model = event["model"]
     if model in CLAUDE_RATES:
         return sum(
@@ -209,16 +305,18 @@ def collect(period: str) -> tuple[list[dict], datetime | None, datetime | None]:
     since = period_start(period)
     models = {}
     first = last = None
-    for event in chain(scan_codex(), scan_claude()):
+    for event in chain(scan_codex(), scan_claude(), scan_pi(), scan_antigravity()):
         timestamp = event["timestamp"]
         if since and timestamp < since:
             continue
         first = timestamp if first is None or timestamp < first else first
         last = timestamp if last is None or timestamp > last else last
+        key = (event["provider"], event["model"])
         row = models.setdefault(
-            event["model"],
+            key,
             {
                 "model": event["model"],
+                "provider": event["provider"],
                 "tokens": 0,
                 **dict.fromkeys(TOKEN_FIELDS, 0),
                 "events": 0,
@@ -276,7 +374,10 @@ def print_models(breakdown: bool, period: str) -> None:
     print("-" * 58)
     for model in models:
         cost = format_cost(model["cost"], model["cost_known"])
-        print(f"{model['model']:<30} {format_tokens(model['tokens']):>12} {cost:>12}")
+        label = model["model"]
+        if model["provider"] not in ("codex", "claude"):
+            label = f"{model['provider']}/{label}"
+        print(f"{label:<30} {format_tokens(model['tokens']):>12} {cost:>12}")
 
     if not breakdown:
         return

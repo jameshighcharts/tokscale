@@ -45,6 +45,82 @@ struct Message {
     usage: Option<Usage>,
 }
 
+#[derive(Default, Deserialize)]
+struct PiRecord {
+    #[serde(default, rename = "type")]
+    kind: String,
+    #[serde(default)]
+    timestamp: Value,
+    #[serde(default)]
+    message: PiMessage,
+}
+
+#[derive(Default, Deserialize)]
+struct PiMessage {
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    provider: String,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    usage: Option<PiUsage>,
+}
+
+#[derive(Default, Deserialize)]
+struct PiUsage {
+    #[serde(default)]
+    input: i64,
+    #[serde(default)]
+    output: i64,
+    #[serde(default, rename = "cacheRead")]
+    cache_read: i64,
+    #[serde(default, rename = "cacheWrite")]
+    cache_write: i64,
+    #[serde(default, rename = "totalTokens")]
+    total: i64,
+    #[serde(default)]
+    cost: Option<PiCost>,
+}
+
+#[derive(Default, Deserialize)]
+struct PiCost {
+    #[serde(default)]
+    total: f64,
+}
+
+#[derive(Default, Deserialize)]
+struct AntigravityRecord {
+    #[serde(default)]
+    captured_at: String,
+    #[serde(default)]
+    conversation_id: String,
+    #[serde(default)]
+    session_id: String,
+    #[serde(default)]
+    transcript_path: String,
+    #[serde(default)]
+    model: AntigravityModel,
+    #[serde(default)]
+    context_window: AntigravityContext,
+}
+
+#[derive(Default, Deserialize)]
+struct AntigravityModel {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    display_name: String,
+}
+
+#[derive(Default, Deserialize)]
+struct AntigravityContext {
+    #[serde(default, rename = "total_input_tokens")]
+    input: i64,
+    #[serde(default, rename = "total_output_tokens")]
+    output: i64,
+}
+
 #[derive(Clone, Copy, Default, Deserialize)]
 struct Usage {
     #[serde(default, rename = "input_tokens")]
@@ -64,6 +140,7 @@ struct Usage {
 }
 
 struct Event {
+    provider: String,
     model: String,
     timestamp: DateTime<Utc>,
     input: i64,
@@ -71,6 +148,7 @@ struct Event {
     read: i64,
     write: i64,
     total: i64,
+    cost: Option<f64>,
 }
 
 #[derive(Default)]
@@ -126,6 +204,9 @@ fn epoch_time(value: &str) -> DateTime<Utc> {
 }
 
 fn event_cost(event: &Event) -> Option<f64> {
+    if let Some(cost) = event.cost {
+        return Some(cost.max(0.0));
+    }
     let rate = match event.model.as_str() {
         "claude-fable-5" => Some([10.0, 50.0, 1.0, 12.5]),
         "claude-opus-5" => Some([5.0, 25.0, 0.5, 6.25]),
@@ -170,14 +251,17 @@ impl Collector {
             return;
         }
         let cost = event_cost(&event);
-        let row = self
-            .models
-            .entry(event.model.clone())
-            .or_insert_with(|| Totals {
-                model: event.model,
-                cost_known: true,
-                ..Totals::default()
-            });
+        let key = format!("{}\0{}", event.provider, event.model);
+        let label = if event.provider == "codex" || event.provider == "claude" {
+            event.model.clone()
+        } else {
+            format!("{}/{}", event.provider, event.model)
+        };
+        let row = self.models.entry(key).or_insert_with(|| Totals {
+            model: label,
+            cost_known: true,
+            ..Totals::default()
+        });
         row.input += event.input;
         row.output += event.output;
         row.read += event.read;
@@ -234,6 +318,10 @@ fn claude_line(line: &str) -> bool {
     line.contains("\"assistant\"") && line.contains("\"usage\"")
 }
 
+fn pi_line(line: &str) -> bool {
+    line.contains("\"assistant\"") && line.contains("\"usage\"")
+}
+
 fn scan_codex(home: &Path, collector: &mut Collector) -> i64 {
     let mut found = 0;
     for root in [
@@ -254,6 +342,7 @@ fn scan_codex(home: &Path, collector: &mut Collector) -> i64 {
                 }
                 found += 1;
                 collector.add(Event {
+                    provider: "codex".to_owned(),
                     model: model.clone(),
                     timestamp: parse_time(&record.timestamp),
                     input: usage.input,
@@ -261,6 +350,7 @@ fn scan_codex(home: &Path, collector: &mut Collector) -> i64 {
                     read: usage.cached_input,
                     write: usage.cache_write,
                     total: usage.total,
+                    cost: None,
                 });
             });
         });
@@ -281,6 +371,7 @@ fn scan_codex_sqlite(home: &Path, collector: &mut Collector) {
             continue;
         }
         collector.add(Event {
+            provider: "codex".to_owned(),
             model: fields[0].to_owned(),
             timestamp: epoch_time(fields[1]),
             input: 0,
@@ -288,6 +379,7 @@ fn scan_codex_sqlite(home: &Path, collector: &mut Collector) {
             read: 0,
             write: 0,
             total: fields[2].parse().unwrap_or_default(),
+            cost: None,
         });
     }
 }
@@ -303,6 +395,7 @@ fn scan_claude(home: &Path, collector: &mut Collector) {
                 return;
             }
             collector.add(Event {
+                provider: "claude".to_owned(),
                 model,
                 timestamp: parse_time(&record.timestamp),
                 input: usage.input,
@@ -310,9 +403,98 @@ fn scan_claude(home: &Path, collector: &mut Collector) {
                 read: usage.cache_read,
                 write: usage.cache_create,
                 total: usage.input + usage.output + usage.cache_read + usage.cache_create,
+                cost: None,
             });
         });
     });
+}
+
+fn scan_pi(home: &Path, collector: &mut Collector) {
+    visit_jsonl(&home.join(".pi/agent/sessions"), &mut |path| {
+        let Ok(file) = File::open(path) else { return };
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
+            if !pi_line(&line) {
+                continue;
+            }
+            let Ok(record) = serde_json::from_str::<PiRecord>(&line) else {
+                continue;
+            };
+            let Some(usage) = record.message.usage else {
+                continue;
+            };
+            if record.kind != "message"
+                || record.message.role != "assistant"
+                || record.message.model.is_empty()
+            {
+                continue;
+            }
+            collector.add(Event {
+                provider: if record.message.provider.is_empty() {
+                    "pi".to_owned()
+                } else {
+                    record.message.provider
+                },
+                model: record.message.model,
+                timestamp: parse_time(&record.timestamp),
+                input: usage.input,
+                output: usage.output,
+                read: usage.cache_read,
+                write: usage.cache_write,
+                total: usage.total,
+                cost: usage.cost.map(|cost| cost.total),
+            });
+        }
+    });
+}
+
+fn scan_antigravity(home: &Path, collector: &mut Collector) {
+    let path = home.join(".gemini/antigravity-cli/tokscale-usage.jsonl");
+    let Ok(file) = File::open(path) else { return };
+    let mut previous: HashMap<String, (i64, i64)> = HashMap::new();
+    for line in BufReader::new(file).lines().map_while(Result::ok) {
+        let Ok(record) = serde_json::from_str::<AntigravityRecord>(&line) else {
+            continue;
+        };
+        if record.captured_at.is_empty() {
+            continue;
+        }
+        let conversation = if !record.conversation_id.is_empty() {
+            record.conversation_id.clone()
+        } else if !record.session_id.is_empty() {
+            record.session_id.clone()
+        } else {
+            record.transcript_path.clone()
+        };
+        let model = if !record.model.id.is_empty() {
+            record.model.id.clone()
+        } else {
+            record.model.display_name.clone()
+        };
+        if conversation.is_empty() || model.is_empty() {
+            continue;
+        }
+        let old = previous.get(&conversation).copied().unwrap_or_default();
+        let input = (record.context_window.input - old.0).max(0);
+        let output = (record.context_window.output - old.1).max(0);
+        previous.insert(
+            conversation,
+            (record.context_window.input, record.context_window.output),
+        );
+        if input == 0 && output == 0 {
+            continue;
+        }
+        collector.add(Event {
+            provider: "antigravity".to_owned(),
+            model,
+            timestamp: parse_time(&Value::String(record.captured_at)),
+            input,
+            output,
+            read: 0,
+            write: 0,
+            total: input + output,
+            cost: None,
+        });
+    }
 }
 
 fn token_text(value: i64) -> String {
@@ -447,5 +629,7 @@ fn main() {
         scan_codex_sqlite(&home, &mut collector);
     }
     scan_claude(&home, &mut collector);
+    scan_pi(&home, &mut collector);
+    scan_antigravity(&home, &mut collector);
     report(collector, breakdown);
 }

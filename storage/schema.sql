@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS daily_model_usage (
     usage_date date NOT NULL,
-    provider text NOT NULL CHECK (provider IN ('codex', 'claude')),
+    provider text NOT NULL CHECK (provider IN ('codex', 'claude', 'openrouter', 'pi', 'antigravity')),
     model text NOT NULL,
     input_tokens bigint NOT NULL CHECK (input_tokens >= 0),
     output_tokens bigint NOT NULL CHECK (output_tokens >= 0),
@@ -15,6 +15,12 @@ CREATE TABLE IF NOT EXISTS daily_model_usage (
 
 CREATE INDEX IF NOT EXISTS daily_model_usage_model_date_idx
     ON daily_model_usage (model, usage_date DESC);
+
+ALTER TABLE daily_model_usage
+    DROP CONSTRAINT IF EXISTS daily_model_usage_provider_check;
+ALTER TABLE daily_model_usage
+    ADD CONSTRAINT daily_model_usage_provider_check
+    CHECK (provider IN ('codex', 'claude', 'openrouter', 'pi', 'antigravity'));
 
 CREATE OR REPLACE VIEW daily_usage_summary AS
 SELECT

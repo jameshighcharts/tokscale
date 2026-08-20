@@ -173,6 +173,16 @@ struct Collector {
     last: Option<DateTime<Utc>>,
 }
 
+fn display_label(provider: &str, model: &str) -> String {
+    let prefix = match provider {
+        "antigravity" => "agy-",
+        "openrouter" => "or-",
+        "pi" => "pi-",
+        _ => "",
+    };
+    format!("{}{}", prefix, model.replace('/', "-").to_lowercase())
+}
+
 fn parse_time(value: &Value) -> DateTime<Utc> {
     if let Some(text) = value.as_str() {
         if let Ok(parsed) = DateTime::parse_from_rfc3339(text) {
@@ -252,12 +262,7 @@ impl Collector {
         }
         let cost = event_cost(&event);
         let key = format!("{}\0{}", event.provider, event.model);
-        let label = match event.provider.as_str() {
-            "antigravity" => format!("agy-{}", event.model),
-            "openrouter" => format!("or-{}", event.model),
-            "pi" => format!("pi-{}", event.model),
-            _ => event.model.clone(),
-        };
+        let label = display_label(&event.provider, &event.model);
         let row = self.models.entry(key).or_insert_with(|| Totals {
             model: label,
             cost_known: true,
@@ -524,7 +529,7 @@ fn cost_text(row: &Totals) -> String {
 
 fn interval(first: Option<DateTime<Utc>>, last: Option<DateTime<Utc>>, timezone: Tz) -> String {
     let (Some(first), Some(last)) = (first, last) else {
-        return "No data".into();
+        return "no data".into();
     };
     let first = first.with_timezone(&timezone);
     let last = last.with_timezone(&timezone);
@@ -546,15 +551,15 @@ fn report(collector: Collector, breakdown: bool) {
         .unwrap_or(5)
         .max(5);
     println!(
-        "tokscale · Models · {}\nrange: {}\n",
+        "tokscale · models · {}\nrange: {}\n",
         collector.period,
         interval(collector.first, collector.last, collector.timezone)
     );
     println!(
         "{:<width$} {:>12} {:>12}\n{}",
-        "Model",
-        "Tokens",
-        "Cost",
+        "model",
+        "tokens",
+        "cost",
         "-".repeat(model_width + 1 + 12 + 1 + 12),
         width = model_width
     );
@@ -571,13 +576,13 @@ fn report(collector: Collector, breakdown: bool) {
         return;
     }
     println!(
-        "\nBreakdown\n---------\n{:<width$} {:>10} {:>10} {:>12} {:>13} {:>8}\n{}",
-        "Model",
-        "Input",
-        "Output",
-        "Cache read",
-        "Cache write",
-        "Events",
+        "\nbreakdown\n---------\n{:<width$} {:>10} {:>10} {:>12} {:>13} {:>8}\n{}",
+        "model",
+        "input",
+        "output",
+        "cache read",
+        "cache write",
+        "events",
         "-".repeat(model_width + 1 + 10 + 1 + 10 + 1 + 12 + 1 + 13 + 1 + 8),
         width = model_width
     );
@@ -593,7 +598,7 @@ fn report(collector: Collector, breakdown: bool) {
             width = model_width
         );
     }
-    println!("\nNote: Codex cache read is included inside Input and is not added twice.");
+    println!("\nnote: codex cache read is included inside input and is not added twice.");
 }
 
 fn arguments() -> (bool, String) {

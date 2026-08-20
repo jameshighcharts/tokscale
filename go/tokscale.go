@@ -114,6 +114,10 @@ type collector struct {
 	first, last time.Time
 }
 
+var providerPrefixes = map[string]string{
+	"codex": "", "claude": "", "antigravity": "agy", "openrouter": "or",
+}
+
 var claudeRates = map[string][4]float64{
 	"claude-fable-5":  {10, 50, 1, 12.5},
 	"claude-opus-5":   {5, 25, .5, 6.25},
@@ -172,14 +176,8 @@ func slug(value string) string {
 }
 
 func displayLabel(provider, model string) string {
-	prefix := ""
-	switch provider {
-	case "codex", "claude":
-	case "antigravity":
-		prefix = "agy"
-	case "openrouter":
-		prefix = "or"
-	default:
+	prefix, known := providerPrefixes[provider]
+	if !known {
 		prefix = slug(provider)
 	}
 	model = slug(model)
@@ -277,7 +275,7 @@ func (c *collector) add(e event) {
 	}
 }
 
-func scanLines(path string, relevant func([]byte) bool, visit func(record)) {
+func scanLines[T any](path string, relevant func([]byte) bool, visit func(T)) {
 	file, err := os.Open(path)
 	if err != nil {
 		return
@@ -286,10 +284,10 @@ func scanLines(path string, relevant func([]byte) bool, visit func(record)) {
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
 	for scanner.Scan() {
-		if !relevant(scanner.Bytes()) {
+		if relevant != nil && !relevant(scanner.Bytes()) {
 			continue
 		}
-		var item record
+		var item T
 		if json.Unmarshal(scanner.Bytes(), &item) == nil {
 			visit(item)
 		}
@@ -374,21 +372,10 @@ func scanClaude(home string, c *collector) {
 
 func scanPi(home string, c *collector) {
 	walkJSONL(filepath.Join(home, ".pi", "agent", "sessions"), func(path string) {
-		file, err := os.Open(path)
-		if err != nil {
-			return
-		}
-		defer file.Close()
-		scanner := bufio.NewScanner(file)
-		scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
-		for scanner.Scan() {
-			if !usageLine(scanner.Bytes()) {
-				continue
-			}
-			var item piRecord
-			if json.Unmarshal(scanner.Bytes(), &item) != nil || item.Type != "message" ||
-				item.Message.Role != "assistant" || item.Message.Model == "" || item.Message.Usage == nil {
-				continue
+		scanLines(path, usageLine, func(item piRecord) {
+			if item.Type != "message" || item.Message.Role != "assistant" ||
+				item.Message.Model == "" || item.Message.Usage == nil {
+				return
 			}
 			u := item.Message.Usage
 			provider := item.Message.Provider
@@ -402,24 +389,16 @@ func scanPi(home string, c *collector) {
 			c.add(event{provider: provider, model: item.Message.Model, timestamp: parseTime(item.Timestamp, c.tz),
 				input: u.Input, output: u.Output, read: u.CacheRead, write: u.CacheWrite, total: u.Total,
 				cost: cost, hasCost: hasCost})
-		}
+		})
 	})
 }
 
 func scanAntigravity(home string, c *collector) {
 	path := filepath.Join(home, ".gemini", "antigravity-cli", "tokscale-usage.jsonl")
-	file, err := os.Open(path)
-	if err != nil {
-		return
-	}
-	defer file.Close()
 	previous := make(map[string]antigravitySnapshot)
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
-	for scanner.Scan() {
-		var item antigravityRecord
-		if json.Unmarshal(scanner.Bytes(), &item) != nil || item.CapturedAt == "" {
-			continue
+	scanLines(path, nil, func(item antigravityRecord) {
+		if item.CapturedAt == "" {
+			return
 		}
 		conversation := item.ConversationID
 		if conversation == "" {
@@ -433,7 +412,7 @@ func scanAntigravity(home string, c *collector) {
 			model = item.Model.DisplayName
 		}
 		if conversation == "" || model == "" {
-			continue
+			return
 		}
 		old := previous[conversation]
 		input := max(item.ContextWindow.Input, 0)
@@ -442,11 +421,11 @@ func scanAntigravity(home string, c *collector) {
 		deltaOutput := counterDelta(output, old.output)
 		previous[conversation] = antigravitySnapshot{input, output}
 		if deltaInput == 0 && deltaOutput == 0 {
-			continue
+			return
 		}
 		c.add(event{provider: "antigravity", model: model, timestamp: parseTime(item.CapturedAt, c.tz),
 			input: deltaInput, output: deltaOutput, total: deltaInput + deltaOutput})
-	}
+	})
 }
 
 func tokenText(value int64) string {

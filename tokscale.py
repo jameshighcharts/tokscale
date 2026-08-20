@@ -101,6 +101,19 @@ def local_time(value) -> datetime:
     return parsed.astimezone(LOCAL_TZ)
 
 
+def jsonl_records(paths):
+    for path in paths:
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as stream:
+                for line in stream:
+                    try:
+                        yield json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            continue
+
+
 def usage_event(
     model,
     timestamp,
@@ -134,35 +147,24 @@ def usage_event(
 def scan_codex_rollouts():
     """Read per-turn usage; cached input is part of input, not extra tokens."""
     for base in CODEX_DIRS:
-        if not base.exists():
-            continue
-        for path in base.rglob("*.jsonl"):
-            model = None
-            try:
-                with path.open("r", encoding="utf-8", errors="replace") as stream:
-                    for line in stream:
-                        try:
-                            record = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        payload = record.get("payload") or {}
-                        if record.get("type") == "turn_context" and payload.get("model"):
-                            model = payload["model"]
-                        usage = (payload.get("info") or {}).get("last_token_usage")
-                        if not model or not usage:
-                            continue
-                        yield usage_event(
-                            model,
-                            record.get("timestamp"),
-                            provider="codex",
-                            input_tokens=usage.get("input_tokens"),
-                            output_tokens=usage.get("output_tokens"),
-                            cache_read=usage.get("cached_input_tokens"),
-                            cache_write=usage.get("cache_write_input_tokens"),
-                            total=usage.get("total_tokens"),
-                        )
-            except OSError:
+        model = None
+        for record in jsonl_records(base.rglob("*.jsonl")):
+            payload = record.get("payload") or {}
+            if record.get("type") == "turn_context" and payload.get("model"):
+                model = payload["model"]
+            usage = (payload.get("info") or {}).get("last_token_usage")
+            if not model or not usage:
                 continue
+            yield usage_event(
+                model,
+                record.get("timestamp"),
+                provider="codex",
+                input_tokens=usage.get("input_tokens"),
+                output_tokens=usage.get("output_tokens"),
+                cache_read=usage.get("cached_input_tokens"),
+                cache_write=usage.get("cache_write_input_tokens"),
+                total=usage.get("total_tokens"),
+            )
 
 
 def scan_codex():
@@ -194,117 +196,82 @@ def scan_codex():
 
 
 def scan_claude():
-    if not CLAUDE_PROJECTS.exists():
-        return
-
-    for path in CLAUDE_PROJECTS.rglob("*.jsonl"):
-        try:
-            with path.open("r", encoding="utf-8", errors="replace") as stream:
-                for line in stream:
-                    try:
-                        record = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if record.get("type") != "assistant":
-                        continue
-                    message = record.get("message") or {}
-                    usage = message.get("usage") or {}
-                    model = message.get("model")
-                    if not usage or not model or model == "<synthetic>":
-                        continue
-                    yield usage_event(
-                        model,
-                        record.get("timestamp"),
-                        provider="claude",
-                        input_tokens=usage.get("input_tokens"),
-                        output_tokens=usage.get("output_tokens"),
-                        cache_read=usage.get("cache_read_input_tokens"),
-                        cache_write=usage.get("cache_creation_input_tokens"),
-                    )
-        except OSError:
+    for record in jsonl_records(CLAUDE_PROJECTS.rglob("*.jsonl")):
+        if record.get("type") != "assistant":
             continue
+        message = record.get("message") or {}
+        usage = message.get("usage") or {}
+        model = message.get("model")
+        if not usage or not model or model == "<synthetic>":
+            continue
+        yield usage_event(
+            model,
+            record.get("timestamp"),
+            provider="claude",
+            input_tokens=usage.get("input_tokens"),
+            output_tokens=usage.get("output_tokens"),
+            cache_read=usage.get("cache_read_input_tokens"),
+            cache_write=usage.get("cache_creation_input_tokens"),
+        )
 
 
 def scan_pi():
     """Read Pi assistant responses, including provider and OpenRouter cost."""
-    if not PI_SESSIONS.exists():
-        return
-    for path in PI_SESSIONS.rglob("*.jsonl"):
-        try:
-            with path.open("r", encoding="utf-8", errors="replace") as stream:
-                for line in stream:
-                    try:
-                        record = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    message = record.get("message") or {}
-                    usage = message.get("usage") or {}
-                    if record.get("type") != "message" or message.get("role") != "assistant":
-                        continue
-                    model = message.get("model")
-                    if not model or not usage:
-                        continue
-                    cost = usage.get("cost") or {}
-                    yield usage_event(
-                        model,
-                        record.get("timestamp"),
-                        provider=message.get("provider") or "pi",
-                        input_tokens=usage.get("input"),
-                        output_tokens=usage.get("output"),
-                        cache_read=usage.get("cacheRead"),
-                        cache_write=usage.get("cacheWrite"),
-                        total=usage.get("totalTokens"),
-                        cost_usd=cost.get("total"),
-                    )
-        except OSError:
+    for record in jsonl_records(PI_SESSIONS.rglob("*.jsonl")):
+        message = record.get("message") or {}
+        usage = message.get("usage") or {}
+        if record.get("type") != "message" or message.get("role") != "assistant":
             continue
+        model = message.get("model")
+        if not model or not usage:
+            continue
+        yield usage_event(
+            model,
+            record.get("timestamp"),
+            provider=message.get("provider") or "pi",
+            input_tokens=usage.get("input"),
+            output_tokens=usage.get("output"),
+            cache_read=usage.get("cacheRead"),
+            cache_write=usage.get("cacheWrite"),
+            total=usage.get("totalTokens"),
+            cost_usd=(usage.get("cost") or {}).get("total"),
+        )
 
 
 def scan_antigravity():
     """Read opt-in status-line snapshots and emit cumulative deltas per turn."""
-    if not ANTIGRAVITY_USAGE_LOG.exists():
-        return
     snapshots = {}
-    try:
-        with ANTIGRAVITY_USAGE_LOG.open("r", encoding="utf-8", errors="replace") as stream:
-            for line in stream:
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                payload = record.get("payload") or record
-                context = payload.get("context_window") or {}
-                conversation = (
-                    payload.get("conversation_id")
-                    or payload.get("session_id")
-                    or payload.get("transcript_path")
-                )
-                model_info = payload.get("model") or {}
-                model = model_info.get("id") or model_info.get("display_name")
-                timestamp = record.get("captured_at") or payload.get("created_at")
-                if not conversation or not model or not timestamp:
-                    continue
-                input_total = positive_int(context.get("total_input_tokens"))
-                output_total = positive_int(context.get("total_output_tokens"))
-                if not input_total and not output_total:
-                    continue
-                current = (input_total, output_total, model, timestamp)
-                previous = snapshots.get(conversation)
-                snapshots[conversation] = current
-                previous_input, previous_output = previous[:2] if previous else (0, 0)
-                delta_input = counter_delta(input_total, previous_input)
-                delta_output = counter_delta(output_total, previous_output)
-                if delta_input or delta_output:
-                    yield usage_event(
-                        model,
-                        timestamp,
-                        provider="antigravity",
-                        input_tokens=delta_input,
-                        output_tokens=delta_output,
-                        total=delta_input + delta_output,
-                    )
-    except OSError:
-        return
+    for record in jsonl_records((ANTIGRAVITY_USAGE_LOG,)):
+        payload = record.get("payload") or record
+        context = payload.get("context_window") or {}
+        conversation = (
+            payload.get("conversation_id")
+            or payload.get("session_id")
+            or payload.get("transcript_path")
+        )
+        model_info = payload.get("model") or {}
+        model = model_info.get("id") or model_info.get("display_name")
+        timestamp = record.get("captured_at") or payload.get("created_at")
+        if not conversation or not model or not timestamp:
+            continue
+        totals = (
+            positive_int(context.get("total_input_tokens")),
+            positive_int(context.get("total_output_tokens")),
+        )
+        if not any(totals):
+            continue
+        previous = snapshots.get(conversation, (0, 0))
+        snapshots[conversation] = totals
+        delta_input, delta_output = map(counter_delta, totals, previous)
+        if delta_input or delta_output:
+            yield usage_event(
+                model,
+                timestamp,
+                provider="antigravity",
+                input_tokens=delta_input,
+                output_tokens=delta_output,
+                total=delta_input + delta_output,
+            )
 
 
 def event_cost(event: dict) -> float | None:

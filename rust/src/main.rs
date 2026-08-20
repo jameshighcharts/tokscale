@@ -1,6 +1,6 @@
 use chrono::{DateTime, Datelike, TimeZone, Utc};
 use chrono_tz::{Europe::Oslo, Tz};
-use serde::Deserialize;
+use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::Value;
 use std::{
     collections::HashMap,
@@ -350,10 +350,14 @@ fn visit_jsonl(root: &Path, visit: &mut dyn FnMut(&Path)) {
     }
 }
 
-fn scan_lines(path: &Path, relevant: fn(&str) -> bool, visit: &mut dyn FnMut(Record)) {
+fn scan_lines<T: DeserializeOwned>(
+    path: &Path,
+    relevant: Option<fn(&str) -> bool>,
+    visit: &mut dyn FnMut(T),
+) {
     let Ok(file) = File::open(path) else { return };
     for line in BufReader::new(file).lines().map_while(Result::ok) {
-        if relevant(&line) {
+        if relevant.map_or(true, |check| check(&line)) {
             if let Ok(record) = serde_json::from_str(&line) {
                 visit(record);
             }
@@ -377,7 +381,7 @@ fn scan_codex(home: &Path, collector: &mut Collector) -> i64 {
     ] {
         visit_jsonl(&root, &mut |path| {
             let mut model = String::new();
-            scan_lines(path, codex_line, &mut |record| {
+            scan_lines(path, Some(codex_line), &mut |record: Record| {
                 if record.kind == "turn_context" && !record.payload.model.is_empty() {
                     model = record.payload.model;
                 }
@@ -433,7 +437,7 @@ fn scan_codex_sqlite(home: &Path, collector: &mut Collector) {
 
 fn scan_claude(home: &Path, collector: &mut Collector) {
     visit_jsonl(&home.join(".claude/projects"), &mut |path| {
-        scan_lines(path, usage_line, &mut |record| {
+        scan_lines(path, Some(usage_line), &mut |record: Record| {
             let Some(usage) = record.message.usage else {
                 return;
             };
@@ -458,22 +462,15 @@ fn scan_claude(home: &Path, collector: &mut Collector) {
 
 fn scan_pi(home: &Path, collector: &mut Collector) {
     visit_jsonl(&home.join(".pi/agent/sessions"), &mut |path| {
-        let Ok(file) = File::open(path) else { return };
-        for line in BufReader::new(file).lines().map_while(Result::ok) {
-            if !usage_line(&line) {
-                continue;
-            }
-            let Ok(record) = serde_json::from_str::<PiRecord>(&line) else {
-                continue;
-            };
+        scan_lines(path, Some(usage_line), &mut |record: PiRecord| {
             let Some(usage) = record.message.usage else {
-                continue;
+                return;
             };
             if record.kind != "message"
                 || record.message.role != "assistant"
                 || record.message.model.is_empty()
             {
-                continue;
+                return;
             }
             collector.add(Event {
                 provider: if record.message.provider.is_empty() {
@@ -490,35 +487,31 @@ fn scan_pi(home: &Path, collector: &mut Collector) {
                 total: usage.total,
                 cost: usage.cost.and_then(|cost| cost.total),
             });
-        }
+        });
     });
 }
 
 fn scan_antigravity(home: &Path, collector: &mut Collector) {
     let path = home.join(".gemini/antigravity-cli/tokscale-usage.jsonl");
-    let Ok(file) = File::open(path) else { return };
     let mut previous: HashMap<String, (i64, i64)> = HashMap::new();
-    for line in BufReader::new(file).lines().map_while(Result::ok) {
-        let Ok(record) = serde_json::from_str::<AntigravityRecord>(&line) else {
-            continue;
-        };
+    scan_lines(&path, None, &mut |record: AntigravityRecord| {
         if record.captured_at.is_empty() {
-            continue;
+            return;
         }
-        let conversation = if !record.conversation_id.is_empty() {
-            record.conversation_id.clone()
-        } else if !record.session_id.is_empty() {
-            record.session_id.clone()
-        } else {
-            record.transcript_path.clone()
-        };
-        let model = if !record.model.id.is_empty() {
-            record.model.id.clone()
-        } else {
-            record.model.display_name.clone()
-        };
+        let conversation = [
+            record.conversation_id,
+            record.session_id,
+            record.transcript_path,
+        ]
+        .into_iter()
+        .find(|value| !value.is_empty())
+        .unwrap_or_default();
+        let model = [record.model.id, record.model.display_name]
+            .into_iter()
+            .find(|value| !value.is_empty())
+            .unwrap_or_default();
         if conversation.is_empty() || model.is_empty() {
-            continue;
+            return;
         }
         let old = previous.get(&conversation).copied().unwrap_or_default();
         let input_total = record.context_window.input.max(0);
@@ -527,7 +520,7 @@ fn scan_antigravity(home: &Path, collector: &mut Collector) {
         let output = counter_delta(output_total, old.1);
         previous.insert(conversation, (input_total, output_total));
         if input == 0 && output == 0 {
-            continue;
+            return;
         }
         collector.add(Event {
             provider: "antigravity".to_owned(),
@@ -540,7 +533,7 @@ fn scan_antigravity(home: &Path, collector: &mut Collector) {
             total: input + output,
             cost: None,
         });
-    }
+    });
 }
 
 fn token_text(value: i64) -> String {
@@ -695,7 +688,7 @@ mod tests {
     use super::{counter_delta, display_label};
 
     #[test]
-    fn labels_models_consistently() {
+    fn labels_and_counter_resets() {
         assert_eq!(display_label("codex", "GPT-5.6-Sol"), "gpt-5.6-sol");
         assert_eq!(
             display_label("openrouter", "moonshotai/kimi-k2.6"),
@@ -706,13 +699,9 @@ mod tests {
             "agy-gemini-3.7-flash-(high)"
         );
         assert_eq!(display_label("google", "Gemini Pro"), "google-gemini-pro");
-    }
-
-    #[test]
-    fn handles_counter_growth_and_resets() {
-        assert_eq!(counter_delta(150, 100), 50);
-        assert_eq!(counter_delta(25, 100), 25);
-        assert_eq!(counter_delta(100, 100), 0);
-        assert_eq!(counter_delta(-1, 100), 0);
+        assert_eq!(
+            [(150, 100), (25, 100), (100, 100), (-1, 100)].map(|(a, b)| counter_delta(a, b)),
+            [50, 25, 0, 0]
+        );
     }
 }

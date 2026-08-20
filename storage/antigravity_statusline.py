@@ -24,13 +24,12 @@ def main() -> None:
     except (json.JSONDecodeError, OSError):
         return
 
-    if not isinstance(payload, dict):
+    if not isinstance(payload, dict) or not all(
+        isinstance(payload.get(key) or {}, dict) for key in ("model", "context_window")
+    ):
         return
-
     model = payload.get("model") or {}
     context = payload.get("context_window") or {}
-    if not isinstance(model, dict) or not isinstance(context, dict):
-        return
     record = {
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "conversation_id": payload.get("conversation_id"),

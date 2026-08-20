@@ -54,12 +54,38 @@ GEMINI_PROXY_RATES = {
     "gemini-3.5-flash": (1.5, 9.0, 0.15),
 }
 
+PROVIDER_PREFIXES = {
+    "antigravity": "agy",
+    "openrouter": "or",
+}
+
 
 def positive_int(value) -> int:
     try:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
         return 0
+
+
+def slug(value: str) -> str:
+    return "".join(
+        "-" if character.isspace() or character == "/" else character.lower()
+        for character in value
+    )
+
+
+def display_label(provider: str, model: str) -> str:
+    prefix = PROVIDER_PREFIXES.get(provider)
+    if prefix is None and provider not in ("codex", "claude"):
+        prefix = slug(provider)
+    model = slug(model)
+    return f"{prefix}-{model}" if prefix else model
+
+
+def counter_delta(current: int, previous: int) -> int:
+    """Return growth since the prior snapshot, including a reset baseline."""
+    current = positive_int(current)
+    return current if current < previous else current - previous
 
 
 def local_time(value) -> datetime:
@@ -265,11 +291,9 @@ def scan_antigravity():
                 current = (input_total, output_total, model, timestamp)
                 previous = snapshots.get(conversation)
                 snapshots[conversation] = current
-                if previous is None:
-                    delta_input, delta_output = input_total, output_total
-                else:
-                    delta_input = max(0, input_total - previous[0])
-                    delta_output = max(0, output_total - previous[1])
+                previous_input, previous_output = previous[:2] if previous else (0, 0)
+                delta_input = counter_delta(input_total, previous_input)
+                delta_output = counter_delta(output_total, previous_output)
                 if delta_input or delta_output:
                     yield usage_event(
                         model,
@@ -334,6 +358,7 @@ def collect(period: str) -> tuple[list[dict], datetime | None, datetime | None]:
             {
                 "model": event["model"],
                 "provider": event["provider"],
+                "label": display_label(event["provider"], event["model"]),
                 "tokens": 0,
                 **dict.fromkeys(TOKEN_FIELDS, 0),
                 "events": 0,
@@ -376,7 +401,7 @@ def format_cost(value: float, known: bool) -> str:
 
 def interval(first: datetime | None, last: datetime | None) -> str:
     if not first or not last:
-        return "No data"
+        return "no data"
     first_label = f"{first.strftime('%b')} {first.day}"
     last_label = f"{last.strftime('%b')} {last.day}"
     return first_label if first.date() == last.date() else f"{first_label} – {last_label}"
@@ -384,31 +409,33 @@ def interval(first: datetime | None, last: datetime | None) -> str:
 
 def print_models(breakdown: bool, period: str) -> None:
     models, first, last = collect(period)
-    print(f"tokscale · Models · {period}")
+    model_width = max((len(row["label"]) for row in models), default=5)
+    model_width = max(model_width, len("model"))
+    print(f"tokscale · models · {period}")
     print(f"range: {interval(first, last)}")
     print()
-    print(f"{'Model':<30} {'Tokens':>12} {'Cost':>12}")
-    print("-" * 58)
+    print(f"{'model':<{model_width}} {'tokens':>12} {'cost':>12}")
+    print("-" * (model_width + 26))
     for model in models:
         cost = format_cost(model["cost"], model["cost_known"])
-        label = model["model"]
-        if model["provider"] not in ("codex", "claude"):
-            label = f"{model['provider']}/{label}"
-        print(f"{label:<30} {format_tokens(model['tokens']):>12} {cost:>12}")
+        print(
+            f"{model['label']:<{model_width}} "
+            f"{format_tokens(model['tokens']):>12} {cost:>12}"
+        )
 
     if not breakdown:
         return
     print()
-    print("Breakdown")
+    print("breakdown")
     print("---------")
     print(
-        f"{'Model':<24} {'Input':>10} {'Output':>10} "
-        f"{'Cache read':>12} {'Cache write':>13} {'Events':>8}"
+        f"{'model':<{model_width}} {'input':>10} {'output':>10} "
+        f"{'cache read':>12} {'cache write':>13} {'events':>8}"
     )
-    print("-" * 83)
+    print("-" * (model_width + 58))
     for model in models:
         print(
-            f"{model['model']:<24} "
+            f"{model['label']:<{model_width}} "
             f"{format_tokens(model['input_tokens']):>10} "
             f"{format_tokens(model['output_tokens']):>10} "
             f"{format_tokens(model['cache_read_tokens']):>12} "
@@ -416,11 +443,11 @@ def print_models(breakdown: bool, period: str) -> None:
             f"{model['events']:>8}"
         )
     print()
-    print("Note: Codex cache read is included inside Input and is not added twice.")
+    print("note: codex cache read is included inside input and is not added twice.")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Report local Codex and Claude token usage")
+    parser = argparse.ArgumentParser(description="Report local AI CLI token usage")
     commands = parser.add_subparsers(dest="command", required=True)
     models = commands.add_parser("models", help="show usage grouped by model")
     models.add_argument("--breakdown", action="store_true", help="show token categories")

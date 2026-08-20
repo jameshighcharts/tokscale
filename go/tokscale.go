@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 type usage struct {
@@ -61,7 +62,7 @@ type piUsage struct {
 }
 
 type piCost struct {
-	Total float64 `json:"total"`
+	Total *float64 `json:"total"`
 }
 
 type antigravityRecord struct {
@@ -101,11 +102,15 @@ type totals struct {
 	costKnown                  bool
 }
 
+type modelKey struct {
+	provider, model string
+}
+
 type collector struct {
 	period      string
 	tz          *time.Location
 	now         time.Time
-	models      map[string]*totals
+	models      map[modelKey]*totals
 	first, last time.Time
 }
 
@@ -157,6 +162,43 @@ func parseTime(value any, tz *time.Location) time.Time {
 	return time.Now().In(tz)
 }
 
+func slug(value string) string {
+	return strings.Map(func(character rune) rune {
+		if unicode.IsSpace(character) || character == '/' {
+			return '-'
+		}
+		return unicode.ToLower(character)
+	}, value)
+}
+
+func displayLabel(provider, model string) string {
+	prefix := ""
+	switch provider {
+	case "codex", "claude":
+	case "antigravity":
+		prefix = "agy"
+	case "openrouter":
+		prefix = "or"
+	default:
+		prefix = slug(provider)
+	}
+	model = slug(model)
+	if prefix == "" {
+		return model
+	}
+	return prefix + "-" + model
+}
+
+func counterDelta(current, previous int64) int64 {
+	if current < 0 {
+		current = 0
+	}
+	if current < previous {
+		return current
+	}
+	return current - previous
+}
+
 func (c *collector) includes(t time.Time) bool {
 	if c.period == "all" {
 		return true
@@ -182,6 +224,9 @@ func (c *collector) includes(t time.Time) bool {
 
 func eventCost(e event) (float64, bool) {
 	if e.hasCost {
+		if e.cost < 0 {
+			return 0, true
+		}
 		return e.cost, true
 	}
 	if e.provider == "antigravity" {
@@ -207,14 +252,10 @@ func (c *collector) add(e event) {
 	if !c.includes(e.timestamp) {
 		return
 	}
-	key := e.provider + "\x00" + e.model
+	key := modelKey{provider: e.provider, model: e.model}
 	row := c.models[key]
 	if row == nil {
-		label := e.model
-		if e.provider != "codex" && e.provider != "claude" {
-			label = e.provider + "/" + label
-		}
-		row = &totals{model: label, costKnown: true}
+		row = &totals{model: displayLabel(e.provider, e.model), costKnown: true}
 		c.models[key] = row
 	}
 	row.input += e.input
@@ -260,12 +301,7 @@ func codexLine(line []byte) bool {
 		bytes.Contains(line, []byte(`"last_token_usage"`))
 }
 
-func claudeLine(line []byte) bool {
-	return bytes.Contains(line, []byte(`"assistant"`)) &&
-		bytes.Contains(line, []byte(`"usage"`))
-}
-
-func piLine(line []byte) bool {
+func usageLine(line []byte) bool {
 	return bytes.Contains(line, []byte(`"assistant"`)) &&
 		bytes.Contains(line, []byte(`"usage"`))
 }
@@ -324,7 +360,7 @@ func scanCodexSQLite(home string, c *collector) {
 
 func scanClaude(home string, c *collector) {
 	walkJSONL(filepath.Join(home, ".claude", "projects"), func(path string) {
-		scanLines(path, claudeLine, func(item record) {
+		scanLines(path, usageLine, func(item record) {
 			u, model := item.Message.Usage, item.Message.Model
 			if item.Type != "assistant" || u == nil || model == "" || model == "<synthetic>" {
 				return
@@ -346,7 +382,7 @@ func scanPi(home string, c *collector) {
 		scanner := bufio.NewScanner(file)
 		scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
 		for scanner.Scan() {
-			if !piLine(scanner.Bytes()) {
+			if !usageLine(scanner.Bytes()) {
 				continue
 			}
 			var item piRecord
@@ -360,8 +396,8 @@ func scanPi(home string, c *collector) {
 				provider = "pi"
 			}
 			cost, hasCost := 0.0, false
-			if u.Cost != nil {
-				cost, hasCost = u.Cost.Total, true
+			if u.Cost != nil && u.Cost.Total != nil {
+				cost, hasCost = *u.Cost.Total, true
 			}
 			c.add(event{provider: provider, model: item.Message.Model, timestamp: parseTime(item.Timestamp, c.tz),
 				input: u.Input, output: u.Output, read: u.CacheRead, write: u.CacheWrite, total: u.Total,
@@ -400,15 +436,11 @@ func scanAntigravity(home string, c *collector) {
 			continue
 		}
 		old := previous[conversation]
-		deltaInput := item.ContextWindow.Input - old.input
-		deltaOutput := item.ContextWindow.Output - old.output
-		if deltaInput < 0 {
-			deltaInput = item.ContextWindow.Input
-		}
-		if deltaOutput < 0 {
-			deltaOutput = item.ContextWindow.Output
-		}
-		previous[conversation] = antigravitySnapshot{item.ContextWindow.Input, item.ContextWindow.Output}
+		input := max(item.ContextWindow.Input, 0)
+		output := max(item.ContextWindow.Output, 0)
+		deltaInput := counterDelta(input, old.input)
+		deltaOutput := counterDelta(output, old.output)
+		previous[conversation] = antigravitySnapshot{input, output}
 		if deltaInput == 0 && deltaOutput == 0 {
 			continue
 		}
@@ -445,7 +477,7 @@ func costText(row *totals) string {
 
 func interval(first, last time.Time) string {
 	if first.IsZero() || last.IsZero() {
-		return "No data"
+		return "no data"
 	}
 	start, end := fmt.Sprintf("%s %d", first.Format("Jan"), first.Day()),
 		fmt.Sprintf("%s %d", last.Format("Jan"), last.Day())
@@ -461,21 +493,29 @@ func report(c *collector, breakdown bool) {
 		rows = append(rows, row)
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].total > rows[j].total })
-	fmt.Printf("tokscale · Models · %s\nrange: %s\n\n", c.period, interval(c.first, c.last))
-	fmt.Printf("%-30s %12s %12s\n%s\n", "Model", "Tokens", "Cost", strings.Repeat("-", 58))
+	modelWidth := len("model")
 	for _, row := range rows {
-		fmt.Printf("%-30s %12s %12s\n", row.model, tokenText(row.total), costText(row))
+		if width := len([]rune(row.model)); width > modelWidth {
+			modelWidth = width
+		}
+	}
+	fmt.Printf("tokscale · models · %s\nrange: %s\n\n", c.period, interval(c.first, c.last))
+	fmt.Printf("%-*s %12s %12s\n%s\n", modelWidth, "model", "tokens", "cost",
+		strings.Repeat("-", modelWidth+26))
+	for _, row := range rows {
+		fmt.Printf("%-*s %12s %12s\n", modelWidth, row.model, tokenText(row.total), costText(row))
 	}
 	if !breakdown {
 		return
 	}
-	fmt.Printf("\nBreakdown\n---------\n%-24s %10s %10s %12s %13s %8s\n%s\n",
-		"Model", "Input", "Output", "Cache read", "Cache write", "Events", strings.Repeat("-", 83))
+	fmt.Printf("\nbreakdown\n---------\n%-*s %10s %10s %12s %13s %8s\n%s\n",
+		modelWidth, "model", "input", "output", "cache read", "cache write", "events",
+		strings.Repeat("-", modelWidth+58))
 	for _, row := range rows {
-		fmt.Printf("%-24s %10s %10s %12s %13s %8d\n", row.model, tokenText(row.input),
+		fmt.Printf("%-*s %10s %10s %12s %13s %8d\n", modelWidth, row.model, tokenText(row.input),
 			tokenText(row.output), tokenText(row.read), tokenText(row.write), row.events)
 	}
-	fmt.Println("\nNote: Codex cache read is included inside Input and is not added twice.")
+	fmt.Println("\nnote: codex cache read is included inside input and is not added twice.")
 }
 
 func arguments() (bool, string) {
@@ -506,7 +546,7 @@ func main() {
 		panic(err)
 	}
 	tz := location()
-	c := &collector{period: period, tz: tz, now: time.Now().In(tz), models: make(map[string]*totals)}
+	c := &collector{period: period, tz: tz, now: time.Now().In(tz), models: make(map[modelKey]*totals)}
 	if scanCodex(home, c) == 0 {
 		scanCodexSQLite(home, c)
 	}

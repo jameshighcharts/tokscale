@@ -86,7 +86,7 @@ struct PiUsage {
 #[derive(Default, Deserialize)]
 struct PiCost {
     #[serde(default)]
-    total: f64,
+    total: Option<f64>,
 }
 
 #[derive(Default, Deserialize)]
@@ -168,19 +168,13 @@ struct Collector {
     period: String,
     timezone: Tz,
     now: DateTime<Utc>,
-    models: HashMap<String, Totals>,
+    models: HashMap<(String, String), Totals>,
     first: Option<DateTime<Utc>>,
     last: Option<DateTime<Utc>>,
 }
 
-fn display_label(provider: &str, model: &str) -> String {
-    let prefix = match provider {
-        "antigravity" => "agy-",
-        "openrouter" => "or-",
-        "pi" => "pi-",
-        _ => "",
-    };
-    let normalized = model
+fn slug(value: &str) -> String {
+    value
         .chars()
         .map(|character| {
             if character.is_whitespace() || character == '/' {
@@ -189,8 +183,31 @@ fn display_label(provider: &str, model: &str) -> String {
                 character.to_ascii_lowercase()
             }
         })
-        .collect::<String>();
-    format!("{}{}", prefix, normalized)
+        .collect()
+}
+
+fn display_label(provider: &str, model: &str) -> String {
+    let prefix = match provider {
+        "antigravity" => "agy",
+        "openrouter" => "or",
+        "codex" | "claude" => "",
+        _ => provider,
+    };
+    let model = slug(model);
+    if prefix.is_empty() {
+        model
+    } else {
+        format!("{}-{model}", slug(prefix))
+    }
+}
+
+fn counter_delta(current: i64, previous: i64) -> i64 {
+    let current = current.max(0);
+    if current < previous {
+        current
+    } else {
+        current - previous
+    }
 }
 
 fn parse_time(value: &Value) -> DateTime<Utc> {
@@ -228,7 +245,7 @@ fn event_cost(event: &Event) -> Option<f64> {
         return Some(cost.max(0.0));
     }
     if event.provider == "antigravity" {
-        let model = event.model.to_ascii_lowercase().replace(' ', "-");
+        let model = slug(&event.model);
         let rate = if model.contains("gemini-3.7-flash") || model.contains("gemini-3.6-flash") {
             Some([0.75, 3.75, 0.075])
         } else if model.contains("gemini-3.5-flash") {
@@ -289,7 +306,7 @@ impl Collector {
             return;
         }
         let cost = event_cost(&event);
-        let key = format!("{}\0{}", event.provider, event.model);
+        let key = (event.provider.clone(), event.model.clone());
         let label = display_label(&event.provider, &event.model);
         let row = self.models.entry(key).or_insert_with(|| Totals {
             model: label,
@@ -348,11 +365,7 @@ fn codex_line(line: &str) -> bool {
     line.contains("\"turn_context\"") || line.contains("\"last_token_usage\"")
 }
 
-fn claude_line(line: &str) -> bool {
-    line.contains("\"assistant\"") && line.contains("\"usage\"")
-}
-
-fn pi_line(line: &str) -> bool {
+fn usage_line(line: &str) -> bool {
     line.contains("\"assistant\"") && line.contains("\"usage\"")
 }
 
@@ -420,7 +433,7 @@ fn scan_codex_sqlite(home: &Path, collector: &mut Collector) {
 
 fn scan_claude(home: &Path, collector: &mut Collector) {
     visit_jsonl(&home.join(".claude/projects"), &mut |path| {
-        scan_lines(path, claude_line, &mut |record| {
+        scan_lines(path, usage_line, &mut |record| {
             let Some(usage) = record.message.usage else {
                 return;
             };
@@ -447,7 +460,7 @@ fn scan_pi(home: &Path, collector: &mut Collector) {
     visit_jsonl(&home.join(".pi/agent/sessions"), &mut |path| {
         let Ok(file) = File::open(path) else { return };
         for line in BufReader::new(file).lines().map_while(Result::ok) {
-            if !pi_line(&line) {
+            if !usage_line(&line) {
                 continue;
             }
             let Ok(record) = serde_json::from_str::<PiRecord>(&line) else {
@@ -475,7 +488,7 @@ fn scan_pi(home: &Path, collector: &mut Collector) {
                 read: usage.cache_read,
                 write: usage.cache_write,
                 total: usage.total,
-                cost: usage.cost.map(|cost| cost.total),
+                cost: usage.cost.and_then(|cost| cost.total),
             });
         }
     });
@@ -508,12 +521,11 @@ fn scan_antigravity(home: &Path, collector: &mut Collector) {
             continue;
         }
         let old = previous.get(&conversation).copied().unwrap_or_default();
-        let input = (record.context_window.input - old.0).max(0);
-        let output = (record.context_window.output - old.1).max(0);
-        previous.insert(
-            conversation,
-            (record.context_window.input, record.context_window.output),
-        );
+        let input_total = record.context_window.input.max(0);
+        let output_total = record.context_window.output.max(0);
+        let input = counter_delta(input_total, old.0);
+        let output = counter_delta(output_total, old.1);
+        previous.insert(conversation, (input_total, output_total));
         if input == 0 && output == 0 {
             continue;
         }
@@ -676,4 +688,31 @@ fn main() {
     scan_pi(&home, &mut collector);
     scan_antigravity(&home, &mut collector);
     report(collector, breakdown);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{counter_delta, display_label};
+
+    #[test]
+    fn labels_models_consistently() {
+        assert_eq!(display_label("codex", "GPT-5.6-Sol"), "gpt-5.6-sol");
+        assert_eq!(
+            display_label("openrouter", "moonshotai/kimi-k2.6"),
+            "or-moonshotai-kimi-k2.6"
+        );
+        assert_eq!(
+            display_label("antigravity", "Gemini 3.7 Flash (High)"),
+            "agy-gemini-3.7-flash-(high)"
+        );
+        assert_eq!(display_label("google", "Gemini Pro"), "google-gemini-pro");
+    }
+
+    #[test]
+    fn handles_counter_growth_and_resets() {
+        assert_eq!(counter_delta(150, 100), 50);
+        assert_eq!(counter_delta(25, 100), 25);
+        assert_eq!(counter_delta(100, 100), 0);
+        assert_eq!(counter_delta(-1, 100), 0);
+    }
 }

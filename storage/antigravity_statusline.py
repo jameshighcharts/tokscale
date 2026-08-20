@@ -24,11 +24,17 @@ def main() -> None:
     except (json.JSONDecodeError, OSError):
         return
 
+    if not isinstance(payload, dict):
+        return
+
     model = payload.get("model") or {}
     context = payload.get("context_window") or {}
+    if not isinstance(model, dict) or not isinstance(context, dict):
+        return
     record = {
         "captured_at": datetime.now(timezone.utc).isoformat(),
-        "conversation_id": payload.get("conversation_id") or payload.get("session_id"),
+        "conversation_id": payload.get("conversation_id"),
+        "session_id": payload.get("session_id"),
         "transcript_path": payload.get("transcript_path"),
         "model": {
             "id": model.get("id"),
@@ -39,10 +45,12 @@ def main() -> None:
             "total_output_tokens": context.get("total_output_tokens", 0),
         },
     }
-    LOG.parent.mkdir(parents=True, exist_ok=True)
-    with LOG.open("a", encoding="utf-8") as stream:
-        json.dump(record, stream, separators=(",", ":"))
-        stream.write("\n")
+    try:
+        LOG.parent.mkdir(parents=True, exist_ok=True)
+        with LOG.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, separators=(",", ":")) + "\n")
+    except OSError:
+        pass
 
     used = context.get("used_percentage")
     model_name = model.get("display_name") or model.get("id") or "antigravity"

@@ -1,7 +1,8 @@
 # tokscale
 
 Local Codex, Claude, Pi/OpenRouter, and Antigravity token reports in Python,
-Go, and Rust. All three read the local CLI records directly.
+Go, and Rust. All three read the local CLI records directly and use the same
+compact provider/model labels.
 
 ## Python
 
@@ -12,7 +13,8 @@ python3 tokscale.py models --breakdown --daily
 ```
 
 Pi responses are read from `~/.pi/agent/sessions` and use the exact usage and
-cost fields recorded by Pi (including OpenRouter provider/model IDs).
+cost fields recorded by Pi. Provider IDs are retained as recorded, including
+providers other than OpenRouter.
 
 Antigravity's transcript and SQLite files do not contain historical token
 usage. To opt in to exact per-session counters, configure the included

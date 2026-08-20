@@ -58,6 +58,7 @@ cargo build --release --locked --manifest-path rust/Cargo.toml
 ```
 
 Replace `--daily` with `--weekly`, `--monthly`, or `--all`.
+Use `--daily3` for a compact daily report containing only the top three models.
 
 On the development Mac with warm filesystem caches, ten real daily scans
 averaged roughly 0.34 seconds each for Python, 0.14 seconds for Go, and 0.05

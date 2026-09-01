@@ -35,7 +35,7 @@ class TokscaleTests(unittest.TestCase):
             with patch("sys.stdout", output):
                 tokscale.print_models(False, "all")
 
-        self.assertEqual(output.getvalue().splitlines()[-1], "total           2.0M            —")
+        self.assertEqual(output.getvalue().splitlines()[-1], "total           2.0M       $2.50+")
 
 
 if __name__ == "__main__":

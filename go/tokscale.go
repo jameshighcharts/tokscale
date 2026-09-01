@@ -454,6 +454,17 @@ func costText(row *totals) string {
 	return fmt.Sprintf("$%.2f", row.cost)
 }
 
+func totalCostText(row *totals) string {
+	if !row.costKnown && row.cost == 0 {
+		return "—"
+	}
+	total := costText(&totals{cost: row.cost, costKnown: true})
+	if row.costKnown {
+		return total
+	}
+	return total + "+"
+}
+
 func interval(first, last time.Time) string {
 	if first.IsZero() || last.IsZero() {
 		return "no data"
@@ -494,7 +505,7 @@ func report(c *collector, breakdown bool, limit int) {
 		total.costKnown = total.costKnown && row.costKnown
 	}
 	fmt.Printf("%s\n%-*s %12s %12s\n", strings.Repeat("-", modelWidth+26), modelWidth,
-		total.model, tokenText(total.total), costText(total))
+		total.model, tokenText(total.total), totalCostText(total))
 	if !breakdown {
 		return
 	}

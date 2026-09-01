@@ -560,6 +560,22 @@ fn cost_text(row: &Totals) -> String {
     }
 }
 
+fn total_cost_text(row: &Totals) -> String {
+    if !row.cost_known && row.cost == 0.0 {
+        return "—".to_owned();
+    }
+    let total = cost_text(&Totals {
+        cost: row.cost,
+        cost_known: true,
+        ..Totals::default()
+    });
+    if row.cost_known {
+        total
+    } else {
+        format!("{total}+")
+    }
+}
+
 fn interval(first: Option<DateTime<Utc>>, last: Option<DateTime<Utc>>, timezone: Tz) -> String {
     let (Some(first), Some(last)) = (first, last) else {
         return "no data".into();
@@ -620,7 +636,7 @@ fn report(collector: Collector, breakdown: bool, limit: usize) {
         "-".repeat(model_width + 1 + 12 + 1 + 12),
         total.model,
         token_text(total.total),
-        cost_text(&total),
+        total_cost_text(&total),
         width = model_width
     );
     if !breakdown {
@@ -711,7 +727,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{counter_delta, display_label};
+    use super::{counter_delta, display_label, total_cost_text, Totals};
 
     #[test]
     fn labels_and_counter_resets() {
@@ -728,6 +744,14 @@ mod tests {
         assert_eq!(
             [(150, 100), (25, 100), (100, 100), (-1, 100)].map(|(a, b)| counter_delta(a, b)),
             [50, 25, 0, 0]
+        );
+        assert_eq!(
+            total_cost_text(&Totals {
+                cost: 2.5,
+                cost_known: false,
+                ..Totals::default()
+            }),
+            "$2.50+"
         );
     }
 }

@@ -27,3 +27,10 @@ func TestCounterDelta(t *testing.T) {
 		}
 	}
 }
+
+func TestIncompleteTotalCost(t *testing.T) {
+	row := &totals{cost: 2.5, costKnown: false}
+	if got := totalCostText(row); got != "$2.50+" {
+		t.Fatalf("totalCostText() = %q, want %q", got, "$2.50+")
+	}
+}

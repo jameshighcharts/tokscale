@@ -366,6 +366,13 @@ def format_cost(value: float, known: bool) -> str:
     return f"${value:.2f}"
 
 
+def format_total_cost(value: float, complete: bool) -> str:
+    if not complete and value == 0:
+        return "—"
+    total = format_cost(value, True)
+    return total if complete else f"{total}+"
+
+
 def interval(first: datetime | None, last: datetime | None) -> str:
     if not first or not last:
         return "no data"
@@ -397,7 +404,7 @@ def print_models(breakdown: bool, period: str, limit: int | None = None) -> None
     print(
         f"{'total':<{model_width}} "
         f"{format_tokens(total_tokens):>12} "
-        f"{format_cost(total_cost, total_cost_known):>12}"
+        f"{format_total_cost(total_cost, total_cost_known):>12}"
     )
 
     if not breakdown:

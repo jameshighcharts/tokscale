@@ -487,6 +487,14 @@ func report(c *collector, breakdown bool, limit int) {
 	for _, row := range rows {
 		fmt.Printf("%-*s %12s %12s\n", modelWidth, row.model, tokenText(row.total), costText(row))
 	}
+	total := &totals{model: "total", costKnown: true}
+	for _, row := range rows {
+		total.total += row.total
+		total.cost += row.cost
+		total.costKnown = total.costKnown && row.costKnown
+	}
+	fmt.Printf("%s\n%-*s %12s %12s\n", strings.Repeat("-", modelWidth+26), modelWidth,
+		total.model, tokenText(total.total), costText(total))
 	if !breakdown {
 		return
 	}

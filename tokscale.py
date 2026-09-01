@@ -390,6 +390,15 @@ def print_models(breakdown: bool, period: str, limit: int | None = None) -> None
             f"{model['label']:<{model_width}} "
             f"{format_tokens(model['tokens']):>12} {cost:>12}"
         )
+    total_tokens = sum(model["tokens"] for model in models)
+    total_cost = sum(model["cost"] for model in models)
+    total_cost_known = all(model["cost_known"] for model in models)
+    print("-" * (model_width + 26))
+    print(
+        f"{'total':<{model_width}} "
+        f"{format_tokens(total_tokens):>12} "
+        f"{format_cost(total_cost, total_cost_known):>12}"
+    )
 
     if not breakdown:
         return

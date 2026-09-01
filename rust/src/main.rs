@@ -608,6 +608,21 @@ fn report(collector: Collector, breakdown: bool, limit: usize) {
             width = model_width
         );
     }
+    let total = Totals {
+        model: "total".into(),
+        total: rows.iter().map(|row| row.total).sum(),
+        cost: rows.iter().map(|row| row.cost).sum(),
+        cost_known: rows.iter().all(|row| row.cost_known),
+        ..Totals::default()
+    };
+    println!(
+        "{}\n{:<width$} {:>12} {:>12}",
+        "-".repeat(model_width + 1 + 12 + 1 + 12),
+        total.model,
+        token_text(total.total),
+        cost_text(&total),
+        width = model_width
+    );
     if !breakdown {
         return;
     }

@@ -1,4 +1,6 @@
+import io
 import unittest
+from unittest.mock import patch
 
 import tokscale
 
@@ -22,6 +24,18 @@ class TokscaleTests(unittest.TestCase):
             ],
             [50, 25, 0, 0],
         )
+
+    def test_models_table_ends_with_total(self) -> None:
+        models = [
+            {"label": "known", "tokens": 1_500_000, "cost": 2.5, "cost_known": True},
+            {"label": "unknown", "tokens": 500_000, "cost": 0.0, "cost_known": False},
+        ]
+        output = io.StringIO()
+        with patch.object(tokscale, "collect", return_value=(models, None, None)):
+            with patch("sys.stdout", output):
+                tokscale.print_models(False, "all")
+
+        self.assertEqual(output.getvalue().splitlines()[-1], "total           2.0M            —")
 
 
 if __name__ == "__main__":

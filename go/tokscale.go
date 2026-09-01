@@ -458,11 +458,7 @@ func totalCostText(row *totals) string {
 	if !row.costKnown && row.cost == 0 {
 		return "—"
 	}
-	total := costText(&totals{cost: row.cost, costKnown: true})
-	if row.costKnown {
-		return total
-	}
-	return total + "+"
+	return costText(&totals{cost: row.cost, costKnown: true})
 }
 
 func interval(first, last time.Time) string {

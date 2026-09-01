@@ -564,16 +564,11 @@ fn total_cost_text(row: &Totals) -> String {
     if !row.cost_known && row.cost == 0.0 {
         return "—".to_owned();
     }
-    let total = cost_text(&Totals {
+    cost_text(&Totals {
         cost: row.cost,
         cost_known: true,
         ..Totals::default()
-    });
-    if row.cost_known {
-        total
-    } else {
-        format!("{total}+")
-    }
+    })
 }
 
 fn interval(first: Option<DateTime<Utc>>, last: Option<DateTime<Utc>>, timezone: Tz) -> String {
@@ -751,7 +746,7 @@ mod tests {
                 cost_known: false,
                 ..Totals::default()
             }),
-            "$2.50+"
+            "$2.50"
         );
     }
 }

@@ -369,8 +369,7 @@ def format_cost(value: float, known: bool) -> str:
 def format_total_cost(value: float, complete: bool) -> str:
     if not complete and value == 0:
         return "—"
-    total = format_cost(value, True)
-    return total if complete else f"{total}+"
+    return format_cost(value, True)
 
 
 def interval(first: datetime | None, last: datetime | None) -> str:

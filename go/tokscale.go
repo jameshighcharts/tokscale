@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -15,6 +16,10 @@ import (
 	"time"
 	"unicode"
 )
+
+//go:generate cp ../tokscale.py tokscale.py
+//go:embed tokscale.py
+var deepReporter string
 
 type usage struct {
 	Input       int64 `json:"input_tokens"`
@@ -539,6 +544,20 @@ func arguments() (bool, string, int) {
 }
 
 func main() {
+	for _, arg := range os.Args[1:] {
+		if arg == "--deep-bd" {
+			command := exec.Command("python3", append([]string{"-c", deepReporter}, os.Args[1:]...)...)
+			command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
+			if err := command.Run(); err != nil {
+				if exit, ok := err.(*exec.ExitError); ok {
+					os.Exit(exit.ExitCode())
+				}
+				fmt.Fprintf(os.Stderr, "--deep-bd requires Python 3.10 or newer: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+	}
 	breakdown, period, limit := arguments()
 	home, err := os.UserHomeDir()
 	if err != nil {

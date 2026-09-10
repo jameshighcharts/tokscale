@@ -41,7 +41,7 @@ sessions cannot be reconstructed exactly without those counters.
 
 ## Go
 
-One source file, standard library only:
+Standard library only:
 
 ```bash
 go build -trimpath -ldflags="-s -w" -o tokscale-go ./go/tokscale.go
@@ -59,6 +59,48 @@ cargo build --release --locked --manifest-path rust/Cargo.toml
 
 Replace `--daily` with `--weekly`, `--monthly`, or `--all`.
 Use `--daily3` for a compact daily report containing only the top three models.
+
+## Deep session breakdown
+
+Python, Go, and Rust support `--deep-bd`. The Go and Rust binaries embed the
+Python reporter and require Python 3.10 or newer for this mode. Existing model
+reports remain native. The binaries can run outside the source checkout.
+
+```bash
+tokscale --deep-bd --daily --limit 10
+tokscale models --deep-bd --title "Compass" --sort start
+tokscale --deep-bd --started-after 2026-09-01 --sort tokens
+tokscale --deep-bd --mcp --sort mcp
+tokscale --deep-bd --tool exec --sort tools
+python3 tokscale.py --deep-bd --daily
+./tokscale-go --deep-bd --daily
+./rust/target/release/tokscale-rust --deep-bd --daily
+```
+
+Each session shows its title, ID, start time, models, token categories, tool call
+counts, and MCP activity. Sort by `tokens` (default), `title`, `start`, `tools`,
+or `mcp`. Titles sort alphabetically; other sorts put the largest or newest first.
+`--title` and `--tool` match case-insensitive substrings. `--started-after`
+accepts an ISO date or datetime and uses `TOKSCALE_TZ` when no offset is supplied.
+Period flags filter usage and call timestamps, so an older session with activity
+today still appears in `--daily`. `--daily3` limits the deep report to three sessions.
+
+Codex, Claude, and Pi reports read transcripts. Codex titles use the local task
+database or session index. Antigravity shows recorded counter deltas by session
+ID; its displayed start is the first counter observation, and tool history is
+unavailable. Missing transcripts cannot provide session usage through this mode.
+The deep report uses Codex response usage records when present and cumulative
+counter deltas for older logs to avoid counting repeated snapshots twice.
+
+MCP calls recorded directly in transcripts are counted as calls. MCP references
+inside `exec` code are listed separately: static references may be conditional,
+repeated in loops, or never run. They are not verified execution counts.
+`--mcp` includes both kinds. Token totals belong to sessions; logs do not record
+an exact token cost per tool. Codex cache reads are already included in input.
+
+After editing `tokscale.py`, refresh Go's embedded copy with
+`go generate ./go/tokscale.go` before rebuilding. Go's tests check that this copy
+matches the source. Rust embeds `tokscale.py` directly at build time.
 
 On the development Mac with warm filesystem caches, ten real daily scans
 averaged roughly 0.34 seconds each for Python, 0.14 seconds for Go, and 0.05

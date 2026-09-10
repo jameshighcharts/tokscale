@@ -1,6 +1,19 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
+
+func TestEmbeddedReporterMatchesSource(t *testing.T) {
+	source, err := os.ReadFile("../tokscale.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deepReporter != string(source) {
+		t.Fatal("embedded reporter is stale; run go generate ./go/tokscale.go")
+	}
+}
 
 func TestDisplayLabel(t *testing.T) {
 	for _, test := range []struct{ provider, model, want string }{

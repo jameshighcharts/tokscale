@@ -695,6 +695,20 @@ fn arguments() -> (bool, String, usize) {
 }
 
 fn main() {
+    if env::args().any(|argument| argument == "--deep-bd") {
+        let status = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(include_str!("../../tokscale.py"))
+            .args(env::args().skip(1))
+            .status();
+        match status {
+            Ok(status) => process::exit(status.code().unwrap_or(1)),
+            Err(error) => {
+                eprintln!("--deep-bd requires Python 3.10 or newer: {error}");
+                process::exit(1);
+            }
+        }
+    }
     let (breakdown, period, limit) = arguments();
     let home = env::var_os("HOME")
         .map(PathBuf::from)
